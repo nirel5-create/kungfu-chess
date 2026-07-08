@@ -112,14 +112,15 @@ class TestClickSelectionAndMove(unittest.TestCase):
         self.assertEqual(run_fixture(fixture), "wP .\n")
 
     def test_friendly_click_replaces_selection(self):
+        # wK is used so the follow-up move (one square right) is a legal king step.
         fixture = (
-            "Board:\nwP wN .\nCommands:\n"
+            "Board:\nwP wK .\nCommands:\n"
             "click 50 50\n"
             "click 150 50\n"
             "click 250 50\n"
             "print board\n"
         )
-        self.assertEqual(run_fixture(fixture), "wP . wN\n")
+        self.assertEqual(run_fixture(fixture), "wP . wK\n")
 
     def test_capture_enemy_piece(self):
         fixture = (
@@ -191,6 +192,185 @@ class TestUnits(unittest.TestCase):
         game.click(50, 50)
         game.click(150, 50)
         self.assertEqual(board.render(), "wP .")
+
+    def test_default_movement_covers_KQRBN_but_not_pawn(self):
+        # Rules-as-data (§9): the movement table is a config attribute.
+        for piece in ("K", "Q", "R", "B", "N"):
+            self.assertIn(piece, self.config.movement)
+        self.assertNotIn("P", self.config.movement)
+
+    def test_config_movement_override(self):
+        custom = Config(movement={"X": [(0, 1, 1, False)]})
+        self.assertEqual(custom.movement, {"X": [(0, 1, 1, False)]})
+
+
+class TestMovementRules(unittest.TestCase):
+    """One click selects, the next click attempts a move. Illegal moves are
+    silently ignored (board unchanged)."""
+
+    def test_king_one_step_diagonally(self):
+        fixture = (
+            "Board:\nwK . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 150\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. wK .\n. . .\n")
+
+    def test_king_two_steps_ignored(self):
+        fixture = (
+            "Board:\nwK . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 250 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wK . .\n. . .\n. . .\n")
+
+    def test_rook_slides_along_rank(self):
+        fixture = (
+            "Board:\nwR . . .\nCommands:\n"
+            "click 50 50\n"
+            "click 350 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . . wR\n")
+
+    def test_rook_slides_along_file(self):
+        fixture = (
+            "Board:\nwR .\n. .\n. .\n. .\nCommands:\n"
+            "click 50 50\n"
+            "click 50 350\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". .\n. .\n. .\nwR .\n")
+
+    def test_rook_diagonal_ignored(self):
+        fixture = (
+            "Board:\nwR .\n. .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 150\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wR .\n. .\n")
+
+    def test_rook_blocked_by_piece_on_ray(self):
+        # bP at (0,2) blocks the ray to bR at (0,3).
+        fixture = (
+            "Board:\nwR . bP bR\nCommands:\n"
+            "click 50 50\n"
+            "click 350 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wR . bP bR\n")
+
+    def test_rook_captures_at_end_of_ray(self):
+        fixture = (
+            "Board:\nwR . . bR\nCommands:\n"
+            "click 50 50\n"
+            "click 350 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . . wR\n")
+
+    def test_bishop_slides_diagonally(self):
+        fixture = (
+            "Board:\nwB . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 250 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. . .\n. . wB\n")
+
+    def test_bishop_orthogonal_ignored(self):
+        fixture = (
+            "Board:\nwB . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wB . .\n")
+
+    def test_bishop_blocked_by_piece_on_diagonal(self):
+        fixture = (
+            "Board:\nwB . .\n. bP .\n. . bB\nCommands:\n"
+            "click 50 50\n"
+            "click 250 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wB . .\n. bP .\n. . bB\n")
+
+    def test_queen_slides_orthogonally(self):
+        fixture = (
+            "Board:\nwQ . . .\nCommands:\n"
+            "click 50 50\n"
+            "click 350 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . . wQ\n")
+
+    def test_queen_slides_diagonally(self):
+        fixture = (
+            "Board:\nwQ . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 250 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. . .\n. . wQ\n")
+
+    def test_queen_cannot_leap_over_blocker(self):
+        fixture = (
+            "Board:\nwQ . .\n. bP .\n. . bR\nCommands:\n"
+            "click 50 50\n"
+            "click 250 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wQ . .\n. bP .\n. . bR\n")
+
+    def test_queen_knight_shape_move_ignored(self):
+        fixture = (
+            "Board:\nwQ . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wQ . .\n. . .\n. . .\n")
+
+    def test_knight_L_shape(self):
+        fixture = (
+            "Board:\nwN . .\n. . .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. . .\n. wN .\n")
+
+    def test_knight_straight_move_ignored(self):
+        fixture = (
+            "Board:\nwN . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wN . .\n")
+
+    def test_knight_jumps_over_pieces(self):
+        # wPs at (0,1), (1,0), (1,1) do not block the knight's leap to (2,1).
+        fixture = (
+            "Board:\nwN wP .\nwP wP .\n. . .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". wP .\nwP wP .\n. wN .\n")
+
+    def test_knight_captures_enemy(self):
+        fixture = (
+            "Board:\nwN . .\n. . .\n. bR .\nCommands:\n"
+            "click 50 50\n"
+            "click 150 250\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. . .\n. wN .\n")
 
 
 if __name__ == "__main__":

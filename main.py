@@ -5,6 +5,27 @@ import sys
 ERROR_ROW_WIDTH = "ERROR ROW_WIDTH_MISMATCH"
 ERROR_UNKNOWN_TOKEN = "ERROR UNKNOWN_TOKEN"
 
+# Direction vectors used to build the standard chess movement patterns.
+_ORTHOGONAL = ((-1, 0), (1, 0), (0, -1), (0, 1))
+_DIAGONAL = ((-1, -1), (-1, 1), (1, -1), (1, 1))
+_ALL_DIRECTIONS = _ORTHOGONAL + _DIAGONAL
+_KNIGHT_DELTAS = (
+    (-2, -1), (-2, 1), (-1, -2), (-1, 2),
+    (1, -2), (1, 2), (2, -1), (2, 1),
+)
+
+
+def _default_movement():
+    # Ray tuple: (dr, dc, max_steps, can_jump).
+    # max_steps=None means "slide until blocked or off-board".
+    return {
+        "K": [(dr, dc, 1, False) for dr, dc in _ALL_DIRECTIONS],
+        "Q": [(dr, dc, None, False) for dr, dc in _ALL_DIRECTIONS],
+        "R": [(dr, dc, None, False) for dr, dc in _ORTHOGONAL],
+        "B": [(dr, dc, None, False) for dr, dc in _DIAGONAL],
+        "N": [(dr, dc, 1, True) for dr, dc in _KNIGHT_DELTAS],
+    }
+
 
 class Config:
     """All tunable rules live here. Nothing about *what* pieces exist,
@@ -16,11 +37,15 @@ class Config:
         colors=("w", "b"),
         piece_types=("K", "Q", "R", "B", "N", "P"),
         empty=".",
+        movement=None,
     ):
         self.cell_size = cell_size
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty
+        # movement[piece_letter] -> list of ray tuples (dr, dc, max_steps, can_jump).
+        # Missing entry = unrestricted (any dst legal); used for iteration 3 pawns.
+        self.movement = _default_movement() if movement is None else movement
 
     def is_valid_token(self, token):
         if token == self.empty:
@@ -103,10 +128,38 @@ class Game:
         self._selection = None
 
     def _request_move(self, src, dst):
+        # Illegal moves are silently ignored (iteration 3).
+        if not self._is_legal_move(src, dst):
+            return
         # Instant settle for iteration 2. When travel_time > 0 this becomes
         # a scheduled event resolved by wait() -- see Config.travel_time.
         if self._config.travel_time(src, dst) <= 0:
             self._board.move(src, dst)
+
+    def _is_legal_move(self, src, dst):
+        # Interpret the movement table without ever branching on piece type.
+        piece_type = self._board.piece_at(*src)[1]
+        rays = self._config.movement.get(piece_type)
+        if rays is None:
+            return True
+        dr_needed = dst[0] - src[0]
+        dc_needed = dst[1] - src[1]
+        for dr, dc, max_steps, can_jump in rays:
+            if can_jump:
+                if (dr_needed, dc_needed) == (dr, dc):
+                    return True
+                continue
+            step = 1
+            while max_steps is None or step <= max_steps:
+                r, c = src[0] + step * dr, src[1] + step * dc
+                if not self._board.in_bounds(r, c):
+                    break
+                if (r, c) == dst:
+                    return True
+                if self._board.piece_at(r, c) is not None:
+                    break
+                step += 1
+        return False
 
     def wait(self, ms):
         self._clock += ms  # advances the clock; settle scheduled moves here later
