@@ -2,7 +2,9 @@ import io
 import unittest
 
 import main
-from main import Board, Config, Game
+from board import Board
+from config import Config
+from game import Game
 
 
 def run_fixture(fixture):
