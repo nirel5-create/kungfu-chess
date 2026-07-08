@@ -1,4 +1,4 @@
-# Repo: https://github.com/<your-user>/<your-repo>   <-- replace with your real GitHub URL
+# Repo: https://github.com/nirel5-create/kungfu-chess
 import sys
 
 # Protocol output strings (single source of truth, never inline magic strings).
