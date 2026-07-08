@@ -63,3 +63,23 @@ This section governs *how* the engine is built at the level of data structures a
 * **7. Fuzz the fast path against an oracle.** Keep a naive, obviously-correct reference for move legality and collision, and fuzz the bitboard implementation against it over tens of thousands of random positions. *(This is exactly the brute-force-oracle verification protocol, applied to the engine instead of a single problem.)*
 
 **Correctness gate:** On UltraCode, exactly-matching output and an 80%+ score come first (Section 2). Optimize the hot path aggressively, but keep the `stdin`/`stdout` boundary dead-simple and never let an optimization change a byte of graded output.
+## 9. Clean-Code & Extensibility Contract (Iteration 2+)
+
+These are review-blocking requirements, learned from instructor feedback.
+
+* **Rules are data, not code.** Piece identity and movement live in `Config`
+  as data. The engine *interprets* a rule; it must NEVER branch on a concrete
+  piece type (`if piece == 'R'`). This is what keeps user-defined games
+  ("Shlomi's chess", e.g. a pawn that reverses instead of promoting) possible.
+* **No hardcoded constants or strings in business logic.** Cell size, piece
+  letters, colors, and error strings all sit in configuration/named constants.
+* **Encapsulation.** No class reaches into another's internal storage. The
+  board is accessed only via `piece_at` / `move` / `render`, so it can later
+  become a bitboard with zero changes elsewhere.
+* **DRY / SRP.** Each piece of logic exists in exactly one place; each function
+  does one thing.
+* **Testing.** Dependency injection only — NO monkeypatching (that mutates the
+  code under test at runtime). Inject I/O via `run(inp, out)`. Target 100%
+  coverage on `main.py`. Report: `python -m coverage run -m unittest discover`
+  then `python -m coverage html`.
+* **Environment.** Windows PowerShell: use `;` not `&&`, and `python -m coverage`.
