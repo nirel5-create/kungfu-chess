@@ -5,6 +5,7 @@ import main
 from board import Board
 from config import Config
 from game import Game
+from rules import MoveValidator
 
 
 def run_fixture(fixture):
@@ -204,6 +205,14 @@ class TestUnits(unittest.TestCase):
     def test_config_movement_override(self):
         custom = Config(movement={"X": [(0, 1, 1, False)]})
         self.assertEqual(custom.movement, {"X": [(0, 1, 1, False)]})
+
+    def test_is_legal_rejects_friendly_destination(self):
+        # Game.click masks this via "replace selection", but the validator
+        # must also reject it independently (e.g. direct API callers, future modes).
+        board = Board([["wR", ".", "wP"]], self.config)
+        validator = MoveValidator(board, self.config)
+        # wR geometry reaches (0,2), but wP is there — must be illegal.
+        self.assertFalse(validator.is_legal((0, 0), (0, 2)))
 
 
 class TestMovementRules(unittest.TestCase):

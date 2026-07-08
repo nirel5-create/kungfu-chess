@@ -7,7 +7,11 @@ class MoveValidator:
         self._config = config
 
     def is_legal(self, src, dst):
-        piece_type = self._board.piece_at(*src)[1]
+        piece = self._board.piece_at(*src)
+        dst_piece = self._board.piece_at(*dst)
+        if dst_piece is not None and self._config.same_color(piece, dst_piece):
+            return False
+        piece_type = piece[1]
         rays = self._config.movement.get(piece_type)
         if rays is None:
             return True  # unrestricted (e.g. iteration-3 pawns)
