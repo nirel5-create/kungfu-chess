@@ -11,18 +11,26 @@ class MoveValidator:
         dst_piece = self._board.piece_at(*dst)
         if dst_piece is not None and self._config.same_color(piece, dst_piece):
             return False
-        piece_type = piece[1]
-        rays = self._config.movement.get(piece_type)
+        rays = self._config.movement.get(piece, self._config.movement.get(piece[1]))
         if rays is None:
-            return True  # unrestricted (e.g. iteration-3 pawns)
+            return True  # unrestricted: no rule defined for this piece type
         wanted = (dst[0] - src[0], dst[1] - src[1])
-        for dr, dc, max_steps, can_jump in rays:
+        for dr, dc, max_steps, can_jump, target in rays:
+            if not self._target_ok(target, dst_piece):
+                continue
             if can_jump:
                 if wanted == (dr, dc):
                     return True
             elif self._slides_to(src, dst, dr, dc, max_steps):
                 return True
         return False
+
+    def _target_ok(self, target, dst_piece):
+        if target == "any":
+            return True
+        if target == "empty":
+            return dst_piece is None
+        return dst_piece is not None  # target == "enemy"
 
     def _slides_to(self, src, dst, dr, dc, max_steps):
         step = 1

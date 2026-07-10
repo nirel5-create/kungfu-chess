@@ -1,15 +1,17 @@
+from arbiter import RealTimeArbiter
 from rules import MoveValidator
 
 
 class Game:
-    """Selection FSM + clock. Knows nothing about storage or I/O."""
+    """Selection FSM. Knows nothing about storage, timing, or I/O --
+    RealTimeArbiter owns motion state and simulated time."""
 
     def __init__(self, board, config):
         self._board = board
         self._config = config
         self._validator = MoveValidator(board, config)
+        self._rta = RealTimeArbiter(board, config)
         self._selection = None  # (row, col) or None
-        self._clock = 0  # ms
 
     def _pixel_to_cell(self, x, y):
         return y // self._config.cell_size, x // self._config.cell_size
@@ -31,15 +33,16 @@ class Game:
         self._selection = None
 
     def _request_move(self, src, dst):
+        if self._rta.has_active_motion():
+            return "motion_in_progress"  # board untouched, no motion started
         if not self._validator.is_legal(src, dst):
-            return  # illegal moves are silently ignored
-        # Instant settle for iteration 2. When travel_time > 0 this becomes
-        # a scheduled event resolved by wait() -- see Config.travel_time.
-        if self._config.travel_time(src, dst) <= 0:
-            self._board.move(src, dst)
+            return None  # illegal moves are silently ignored
+        piece = self._board.piece_at(*src)
+        self._rta.start_motion(piece, src, dst)
+        return None
 
     def wait(self, ms):
-        self._clock += ms  # advances the clock; settle scheduled moves here later
+        self._rta.advance_time(ms)
 
     def render(self):
         return self._board.render()

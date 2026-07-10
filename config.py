@@ -8,15 +8,29 @@ _KNIGHT_DELTAS = (
 )
 
 
+def _pawn_rules(direction):
+    # direction: -1 = up the board (white), +1 = down the board (black).
+    return [
+        (direction, 0, 1, False, "empty"),   # forward one step, only into empty
+        (direction, -1, 1, False, "enemy"),  # capture diagonally
+        (direction, 1, 1, False, "enemy"),
+    ]
+
+
 def _default_movement():
-    # Ray tuple: (dr, dc, max_steps, can_jump).
+    # Ray tuple: (dr, dc, max_steps, can_jump, target).
     # max_steps=None means "slide until blocked or off-board".
+    # target: "any" (empty or enemy ok), "empty" (must be unoccupied),
+    # or "enemy" (must hold an opposing piece) -- lets move geometry
+    # and capture geometry differ (needed for pawns).
     return {
-        "K": [(dr, dc, 1, False) for dr, dc in _ALL_DIRECTIONS],
-        "Q": [(dr, dc, None, False) for dr, dc in _ALL_DIRECTIONS],
-        "R": [(dr, dc, None, False) for dr, dc in _ORTHOGONAL],
-        "B": [(dr, dc, None, False) for dr, dc in _DIAGONAL],
-        "N": [(dr, dc, 1, True) for dr, dc in _KNIGHT_DELTAS],
+        "K": [(dr, dc, 1, False, "any") for dr, dc in _ALL_DIRECTIONS],
+        "Q": [(dr, dc, None, False, "any") for dr, dc in _ALL_DIRECTIONS],
+        "R": [(dr, dc, None, False, "any") for dr, dc in _ORTHOGONAL],
+        "B": [(dr, dc, None, False, "any") for dr, dc in _DIAGONAL],
+        "N": [(dr, dc, 1, True, "any") for dr, dc in _KNIGHT_DELTAS],
+        "wP": _pawn_rules(-1),
+        "bP": _pawn_rules(1),
     }
 
 
@@ -31,14 +45,17 @@ class Config:
         piece_types=("K", "Q", "R", "B", "N", "P"),
         empty=".",
         movement=None,
+        piece_speed_ms=1000,
     ):
         self.cell_size = cell_size
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty
         # movement[piece_letter] -> list of ray tuples (dr, dc, max_steps, can_jump).
-        # Missing entry = unrestricted (any dst legal); used for iteration 3 pawns.
+        # Missing entry = unrestricted (any dst legal).
         self.movement = _default_movement() if movement is None else movement
+        # ms to cross one cell; N cells = N * piece_speed_ms (iteration 5).
+        self.piece_speed_ms = piece_speed_ms
 
     def is_valid_token(self, token):
         if token == self.empty:
@@ -53,7 +70,7 @@ class Config:
         return token_a[0] == token_b[0]
 
     def travel_time(self, src, dst):
-        # Iteration 2: no numbers are given, so moves are instant.
-        # When travel time arrives, return the duration here and the
-        # settle machinery in Game already handles the rest.
-        return 0
+        # Cell-step count (Chebyshev distance), not Euclidean: a diagonal
+        # step costs the same as an orthogonal one.
+        steps = max(abs(dst[0] - src[0]), abs(dst[1] - src[1]))
+        return steps * self.piece_speed_ms
