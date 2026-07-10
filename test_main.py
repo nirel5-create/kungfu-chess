@@ -609,6 +609,14 @@ class TestRealTimeArbiter(unittest.TestCase):
         self.assertEqual(self.rta.advance_time(500), [])
         self.assertEqual(self.board.render(), "wR . .")
 
+    def test_can_start_new_motion_immediately_after_arrival(self):
+        self.rta.start_motion("wR", (0, 0), (0, 1))  # 1 cell -> 1000ms
+        self.rta.advance_time(1000)  # arrives; board is now ". wR ."
+        self.assertFalse(self.rta.has_active_motion())
+
+        self.rta.start_motion("wR", (0, 1), (0, 2))  # immediately, no extra wait
+        self.assertTrue(self.rta.has_active_motion())
+
 
 class TestGameMotionWiring(unittest.TestCase):
     def test_two_cell_move_not_arrived_after_partial_wait(self):
@@ -634,6 +642,22 @@ class TestGameMotionWiring(unittest.TestCase):
         reason = game._request_move((0, 0), (0, 1))
         self.assertEqual(reason, "motion_in_progress")
         self.assertEqual(board.render(), "wR . bR")  # still untouched
+
+    def test_piece_moves_again_immediately_after_arrival(self):
+        p0_x, p0_y = cell_center(0, 0)
+        p1_x, p1_y = cell_center(1, 0)
+        p2_x, p2_y = cell_center(2, 0)
+        fixture = (
+            "Board:\nwR . .\nCommands:\n"
+            f"click {p0_x} {p0_y}\n"
+            f"click {p1_x} {p1_y}\n"
+            f"wait {wait_for(1)}\n"
+            f"click {p1_x} {p1_y}\n"
+            f"click {p2_x} {p2_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . wR\n")
 
 
 if __name__ == "__main__":
