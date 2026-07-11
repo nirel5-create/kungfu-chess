@@ -29,6 +29,11 @@ class RealTimeArbiter:
                 occupant is not None and occupant[1] == self._config.king_type
             )
             self._board.move(motion.source, motion.destination)
+            promoted = self._config.promotion_target(
+                motion.piece, motion.destination[0], self._board
+            )
+            if promoted is not None:
+                self._board.set_piece(motion.destination, promoted)
             self._active_motion = None
             return [motion]
         return []

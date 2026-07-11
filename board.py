@@ -27,5 +27,9 @@ class Board:
         self._grid[r2][c2] = self._grid[r1][c1]
         self._grid[r1][c1] = self._config.empty
 
+    def set_piece(self, cell, token):
+        row, col = cell
+        self._grid[row][col] = token
+
     def render(self):
         return "\n".join(" ".join(row) for row in self._grid)

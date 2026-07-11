@@ -15,8 +15,10 @@ class MoveValidator:
         if rays is None:
             return True  # unrestricted: no rule defined for this piece type
         wanted = (dst[0] - src[0], dst[1] - src[1])
-        for dr, dc, max_steps, can_jump, target in rays:
+        for dr, dc, max_steps, can_jump, target, from_row in rays:
             if not self._target_ok(target, dst_piece):
+                continue
+            if from_row is not None and src[0] != self._config.pawn_start_row(piece[0], self._board):
                 continue
             if can_jump:
                 if wanted == (dr, dc):

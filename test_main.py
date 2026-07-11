@@ -255,6 +255,27 @@ class TestUnits(unittest.TestCase):
         # wR geometry reaches (0,2), but wP is there — must be illegal.
         self.assertFalse(validator.is_legal((0, 0), (0, 2)))
 
+    def test_promotion_target_white_pawn_on_black_start_row(self):
+        board = Board([[".", "."], [".", "."], [".", "."]], self.config)  # 3 rows
+        self.assertEqual(self.config.promotion_target("wP", 0, board), "wQ")
+
+    def test_promotion_target_black_pawn_on_white_start_row(self):
+        board = Board([[".", "."], [".", "."], [".", "."]], self.config)  # 3 rows
+        self.assertEqual(self.config.promotion_target("bP", 2, board), "bQ")
+
+    def test_promotion_target_none_mid_board(self):
+        board = Board([[".", "."], [".", "."], [".", "."]], self.config)
+        self.assertIsNone(self.config.promotion_target("wP", 1, board))
+
+    def test_promotion_target_none_for_non_promoting_piece(self):
+        board = Board([[".", "."], [".", "."], [".", "."]], self.config)
+        self.assertIsNone(self.config.promotion_target("wR", 0, board))
+
+    def test_board_set_piece_replaces_token(self):
+        board = Board([["wP", "."]], self.config)
+        board.set_piece((0, 0), "wQ")
+        self.assertEqual(board.render(), "wQ .")
+
     def test_is_legal_unrestricted_when_no_movement_rule_defined(self):
         # Extensibility (ctd_rules.md §5): a custom piece type with no rule
         # entry is unrestricted, same as pre-pawn-rules iteration-3 behavior.
@@ -472,9 +493,24 @@ class TestPawnMovementRules(unittest.TestCase):
         validator = MoveValidator(board, self.config)
         self.assertTrue(validator.is_legal((1, 1), (0, 1)))
 
-    def test_white_pawn_double_step_illegal(self):
+    def test_white_pawn_double_step_from_start_row_legal(self):
         board = Board(
             [[".", ".", "."], [".", ".", "."], [".", "wP", "."]], self.config
+        )
+        validator = MoveValidator(board, self.config)
+        self.assertTrue(validator.is_legal((2, 1), (0, 1)))
+
+    def test_white_pawn_double_step_not_from_start_row_illegal(self):
+        board = Board(
+            [[".", ".", "."], [".", ".", "."], [".", "wP", "."], [".", ".", "."]],
+            self.config,
+        )
+        validator = MoveValidator(board, self.config)
+        self.assertFalse(validator.is_legal((2, 1), (0, 1)))
+
+    def test_white_pawn_double_step_blocked_path_illegal(self):
+        board = Board(
+            [[".", ".", "."], [".", "bR", "."], [".", "wP", "."]], self.config
         )
         validator = MoveValidator(board, self.config)
         self.assertFalse(validator.is_legal((2, 1), (0, 1)))
@@ -494,26 +530,26 @@ class TestPawnMovementRules(unittest.TestCase):
         validator = MoveValidator(board, self.config)
         self.assertTrue(validator.is_legal((0, 1), (1, 1)))
 
-    def test_black_pawn_double_step_illegal(self):
+    def test_black_pawn_double_step_from_start_row_legal(self):
         board = Board(
             [[".", "bP", "."], [".", ".", "."], [".", ".", "."]], self.config
         )
         validator = MoveValidator(board, self.config)
-        self.assertFalse(validator.is_legal((0, 1), (2, 1)))
+        self.assertTrue(validator.is_legal((0, 1), (2, 1)))
 
 
 class TestPawnMotionIntegration(unittest.TestCase):
-    def test_white_pawn_double_step_from_start_stays_put(self):
-        src_x, src_y = cell_center(1, 2)
-        dst_x, dst_y = cell_center(1, 0)
+    def test_white_pawn_double_step_from_start_arrives(self):
+        src_x, src_y = cell_center(1, 3)
+        dst_x, dst_y = cell_center(1, 1)
         fixture = (
-            "Board:\n. . .\n. . .\n. wP .\nCommands:\n"
+            "Board:\n. . .\n. . .\n. . .\n. wP .\nCommands:\n"
             f"click {src_x} {src_y}\n"
             f"click {dst_x} {dst_y}\n"
             f"wait {wait_for(2)}\n"
             "print board\n"
         )
-        self.assertEqual(run_fixture(fixture), ". . .\n. . .\n. wP .\n")
+        self.assertEqual(run_fixture(fixture), ". . .\n. wP .\n. . .\n. . .\n")
 
     def test_white_pawn_cannot_capture_forward(self):
         src_x, src_y = cell_center(1, 1)
@@ -528,6 +564,32 @@ class TestPawnMotionIntegration(unittest.TestCase):
         self.assertEqual(run_fixture(fixture), ". bR .\n. wP .\n")
 
     def test_white_pawn_one_step_forward_arrives(self):
+        src_x, src_y = cell_center(1, 2)
+        dst_x, dst_y = cell_center(1, 1)
+        fixture = (
+            "Board:\n. . .\n. . .\n. wP .\nCommands:\n"
+            f"click {src_x} {src_y}\n"
+            f"click {dst_x} {dst_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\n. wP .\n. . .\n")
+
+    def test_white_pawn_diagonal_capture_arrives(self):
+        src_x, src_y = cell_center(1, 2)
+        dst_x, dst_y = cell_center(0, 1)
+        fixture = (
+            "Board:\n. . .\nbR . .\n. wP .\nCommands:\n"
+            f"click {src_x} {src_y}\n"
+            f"click {dst_x} {dst_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . .\nwP . .\n. . .\n")
+
+
+class TestPawnPromotionIntegration(unittest.TestCase):
+    def test_white_pawn_promotes_to_queen_on_arrival(self):
         src_x, src_y = cell_center(1, 1)
         dst_x, dst_y = cell_center(1, 0)
         fixture = (
@@ -537,19 +599,19 @@ class TestPawnMotionIntegration(unittest.TestCase):
             f"wait {wait_for(1)}\n"
             "print board\n"
         )
-        self.assertEqual(run_fixture(fixture), ". wP .\n. . .\n")
+        self.assertEqual(run_fixture(fixture), ". wQ .\n. . .\n")
 
-    def test_white_pawn_diagonal_capture_arrives(self):
-        src_x, src_y = cell_center(1, 1)
-        dst_x, dst_y = cell_center(0, 0)
+    def test_black_pawn_promotes_to_queen_on_arrival(self):
+        src_x, src_y = cell_center(1, 0)
+        dst_x, dst_y = cell_center(1, 1)
         fixture = (
-            "Board:\nbR . .\n. wP .\nCommands:\n"
+            "Board:\n. bP .\n. . .\nCommands:\n"
             f"click {src_x} {src_y}\n"
             f"click {dst_x} {dst_y}\n"
             f"wait {wait_for(1)}\n"
             "print board\n"
         )
-        self.assertEqual(run_fixture(fixture), "wP . .\n. . .\n")
+        self.assertEqual(run_fixture(fixture), ". . .\n. bQ .\n")
 
 
 class TestMotion(unittest.TestCase):
@@ -633,6 +695,44 @@ class TestRealTimeArbiter(unittest.TestCase):
         rta.advance_time(1000)
         self.assertFalse(rta.king_was_captured())
         self.assertEqual(board.render(), ". wR")
+
+    def test_white_pawn_promotes_to_queen_on_arrival(self):
+        board = Board([[".", "."], [".", "."], [".", "wP"]], self.config)  # 3 rows
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("wP", (2, 1), (1, 1))  # 1 cell -> 1000ms, not yet promotion row
+        rta.advance_time(1000)
+        self.assertEqual(board.render(), ". .\n. wP\n. .")
+
+        rta.start_motion("wP", (1, 1), (0, 1))  # arrives on row 0 -> promotes
+        rta.advance_time(1000)
+        self.assertEqual(board.render(), ". wQ\n. .\n. .")
+
+    def test_black_pawn_promotes_to_queen_on_arrival(self):
+        board = Board([[".", "bP"], [".", "."], [".", "."]], self.config)  # 3 rows
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("bP", (0, 1), (2, 1))  # 2 cells -> 2000ms, arrives on row 2
+        rta.advance_time(2000)
+        self.assertEqual(board.render(), ". .\n. .\n. bQ")
+
+    def test_non_promoting_arrival_stays_a_pawn(self):
+        board = Board([[".", "."], [".", "."], [".", "wP"]], self.config)  # 3 rows
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("wP", (2, 1), (1, 1))  # arrives mid-board, no promotion
+        rta.advance_time(1000)
+        self.assertEqual(board.render(), ". .\n. wP\n. .")
+
+    def test_promoted_queen_has_queen_movement(self):
+        board = Board(
+            [[".", ".", "."], [".", ".", "."], [".", "wP", "."]], self.config
+        )  # 3 rows
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("wP", (2, 1), (0, 1))  # 2 cells -> 2000ms, from start row, promotes
+        rta.advance_time(2000)
+        self.assertEqual(board.render(), ". wQ .\n. . .\n. . .")
+
+        validator = MoveValidator(board, self.config)
+        # (0,1) -> (0,2): sideways -- no pawn ray permits dr=0, but legal for a queen.
+        self.assertTrue(validator.is_legal((0, 1), (0, 2)))
 
 
 class TestGameMotionWiring(unittest.TestCase):
