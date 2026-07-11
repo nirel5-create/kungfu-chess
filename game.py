@@ -12,6 +12,7 @@ class Game:
         self._validator = MoveValidator(board, config)
         self._rta = RealTimeArbiter(board, config)
         self._selection = None  # (row, col) or None
+        self._game_over = False
 
     def _pixel_to_cell(self, x, y):
         return y // self._config.cell_size, x // self._config.cell_size
@@ -33,6 +34,8 @@ class Game:
         self._selection = None
 
     def _request_move(self, src, dst):
+        if self._game_over:
+            return "game_over"  # board untouched, nothing else checked
         if self._rta.has_active_motion():
             return "motion_in_progress"  # board untouched, no motion started
         if not self._validator.is_legal(src, dst):
@@ -43,6 +46,8 @@ class Game:
 
     def wait(self, ms):
         self._rta.advance_time(ms)
+        if self._rta.king_was_captured():
+            self._game_over = True
 
     def render(self):
         return self._board.render()

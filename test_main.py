@@ -617,6 +617,23 @@ class TestRealTimeArbiter(unittest.TestCase):
         self.rta.start_motion("wR", (0, 1), (0, 2))  # immediately, no extra wait
         self.assertTrue(self.rta.has_active_motion())
 
+    def test_king_was_captured_true_on_arrival_into_enemy_king(self):
+        board = Board([["wR", "bK"]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("wR", (0, 0), (0, 1))  # 1 cell -> 1000ms
+        self.assertFalse(rta.king_was_captured())  # not yet arrived
+        rta.advance_time(1000)
+        self.assertTrue(rta.king_was_captured())
+        self.assertEqual(board.render(), ". wR")
+
+    def test_king_was_captured_false_for_non_king_capture(self):
+        board = Board([["wR", "bR"]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_motion("wR", (0, 0), (0, 1))
+        rta.advance_time(1000)
+        self.assertFalse(rta.king_was_captured())
+        self.assertEqual(board.render(), ". wR")
+
 
 class TestGameMotionWiring(unittest.TestCase):
     def test_two_cell_move_not_arrived_after_partial_wait(self):
@@ -658,6 +675,40 @@ class TestGameMotionWiring(unittest.TestCase):
             "print board\n"
         )
         self.assertEqual(run_fixture(fixture), ". . wR\n")
+
+    def test_capturing_king_ends_the_game(self):
+        config = Config()
+        board = Board([["wR", "bK"]], config)
+        game = Game(board, config)
+        game.click(50, 50)                      # select wR at (0,0)
+        game.click(*cell_center(1, 0))           # request move onto bK at (0,1)
+        game.wait(wait_for(1))
+        self.assertEqual(board.render(), ". wR")
+
+    def test_request_move_rejected_after_game_over(self):
+        config = Config()
+        board = Board([["wR", "bK", "."]], config)
+        game = Game(board, config)
+        game.click(50, 50)                      # select wR at (0,0)
+        game.click(*cell_center(1, 0))           # capture the king
+        game.wait(wait_for(1))
+        self.assertEqual(board.render(), ". wR .")
+
+        reason = game._request_move((0, 1), (0, 2))  # wR now at (0,1), legal-looking move
+        self.assertEqual(reason, "game_over")
+        self.assertEqual(board.render(), ". wR .")  # untouched
+
+    def test_non_king_capture_does_not_end_the_game(self):
+        config = Config()
+        board = Board([["wR", "bR"]], config)
+        game = Game(board, config)
+        game.click(50, 50)
+        game.click(*cell_center(1, 0))
+        game.wait(wait_for(1))
+        self.assertEqual(board.render(), ". wR")
+
+        reason = game._request_move((0, 1), (0, 0))  # move back, should still work
+        self.assertIsNone(reason)  # accepted (legal, no game_over gate)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ class RealTimeArbiter:
         self._config = config
         self._clock = 0  # ms
         self._active_motion = None
+        self._king_captured = False
 
     def has_active_motion(self):
         return self._active_motion is not None
@@ -21,8 +22,16 @@ class RealTimeArbiter:
     def advance_time(self, ms):
         self._clock += ms
         motion = self._active_motion
+        self._king_captured = False
         if motion is not None and self._clock >= motion.arrival_time:
+            occupant = self._board.piece_at(*motion.destination)
+            self._king_captured = (
+                occupant is not None and occupant[1] == self._config.king_type
+            )
             self._board.move(motion.source, motion.destination)
             self._active_motion = None
             return [motion]
         return []
+
+    def king_was_captured(self):
+        return self._king_captured

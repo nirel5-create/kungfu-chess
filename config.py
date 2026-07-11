@@ -46,6 +46,7 @@ class Config:
         empty=".",
         movement=None,
         piece_speed_ms=1000,
+        king_type="K",
     ):
         self.cell_size = cell_size
         self.colors = colors
@@ -56,6 +57,8 @@ class Config:
         self.movement = _default_movement() if movement is None else movement
         # ms to cross one cell; N cells = N * piece_speed_ms (iteration 5).
         self.piece_speed_ms = piece_speed_ms
+        # Which piece type ends the game when captured (iteration 8).
+        self.king_type = king_type
 
     def is_valid_token(self, token):
         if token == self.empty:
