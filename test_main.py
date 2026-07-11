@@ -6,6 +6,7 @@ from arbiter import RealTimeArbiter
 from board import Board
 from config import Config
 from game import Game
+from jump import Jump
 from motion import Motion
 from rules import MoveValidator
 
@@ -254,6 +255,11 @@ class TestUnits(unittest.TestCase):
         validator = MoveValidator(board, self.config)
         # wR geometry reaches (0,2), but wP is there — must be illegal.
         self.assertFalse(validator.is_legal((0, 0), (0, 2)))
+
+    def test_jump_ms_default_and_override(self):
+        self.assertEqual(self.config.jump_ms, 1000)
+        fast = Config(jump_ms=250)
+        self.assertEqual(fast.jump_ms, 250)
 
     def test_promotion_target_white_pawn_on_black_start_row(self):
         board = Board([[".", "."], [".", "."], [".", "."]], self.config)  # 3 rows
@@ -629,6 +635,17 @@ class TestMotion(unittest.TestCase):
         )
 
 
+class TestJump(unittest.TestCase):
+    def test_jump_stores_piece_cell_and_end_time(self):
+        jump = Jump("wR", (0, 1), 1000)
+        self.assertEqual(jump.piece, "wR")
+        self.assertEqual(jump.cell, (0, 1))
+        self.assertEqual(jump.end_time, 1000)
+
+    def test_jump_equality_is_by_value(self):
+        self.assertEqual(Jump("wR", (0, 1), 1000), Jump("wR", (0, 1), 1000))
+
+
 class TestRealTimeArbiter(unittest.TestCase):
     def setUp(self):
         self.config = Config()
@@ -637,6 +654,72 @@ class TestRealTimeArbiter(unittest.TestCase):
 
     def test_no_active_motion_initially(self):
         self.assertFalse(self.rta.has_active_motion())
+
+    def test_no_airborne_piece_initially(self):
+        self.assertFalse(self.rta.has_airborne_piece())
+        self.assertFalse(self.rta.is_airborne((0, 0)))
+
+    def test_start_jump_marks_airborne_and_leaves_board_unchanged(self):
+        self.rta.start_jump("wR", (0, 0))
+        self.assertTrue(self.rta.has_airborne_piece())
+        self.assertTrue(self.rta.is_airborne((0, 0)))
+        self.assertFalse(self.rta.is_airborne((0, 1)))
+        self.assertEqual(self.board.render(), "wR . .")
+
+    def test_is_moving_true_for_active_motion_source_only(self):
+        self.rta.start_motion("wR", (0, 0), (0, 1))
+        self.assertTrue(self.rta.is_moving((0, 0)))
+        self.assertFalse(self.rta.is_moving((0, 1)))
+
+    def test_is_moving_false_with_no_active_motion(self):
+        self.assertFalse(self.rta.is_moving((0, 0)))
+
+    def test_reversal_captures_enemy_arriving_exactly_at_end_time(self):
+        board = Board([["wK", "bR", "."]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("wK", (0, 0))  # end_time = 1000
+        rta.start_motion("bR", (0, 1), (0, 0))  # 1 cell -> 1000ms, arrival_time = 1000
+        events = rta.advance_time(1000)
+        self.assertEqual(events, [Motion("bR", (0, 1), (0, 0), 1000)])
+        self.assertEqual(board.render(), "wK . .")  # jumper stays, arriver removed
+        self.assertFalse(rta.has_active_motion())
+        self.assertFalse(rta.has_airborne_piece())  # jump resolved via capture
+
+    def test_arrival_after_jump_window_lands_normally(self):
+        board = Board([["wK", ".", "bR"]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("wK", (0, 0))  # end_time = 1000
+        rta.start_motion("bR", (0, 2), (0, 0))  # 2 cells -> 2000ms, arrival_time = 2000
+        events = rta.advance_time(2000)
+        self.assertEqual(events, [Motion("bR", (0, 2), (0, 0), 2000)])
+        self.assertEqual(board.render(), "bR . .")  # enemy lands normally, capturing wK
+        self.assertTrue(rta.king_was_captured())
+
+    def test_friendly_arrival_at_airborne_cell_not_reversed(self):
+        board = Board([["wK", "wR", "."]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("wK", (0, 0))  # end_time = 1000
+        rta.start_motion("wR", (0, 1), (0, 0))  # friendly, 1 cell -> 1000ms
+        events = rta.advance_time(1000)
+        self.assertEqual(events, [Motion("wR", (0, 1), (0, 0), 1000)])
+        self.assertEqual(board.render(), "wR . .")  # friendly lands normally, not reversed
+
+    def test_jump_times_out_with_no_arrival(self):
+        board = Board([["wK", ".", "."]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("wK", (0, 0))
+        rta.advance_time(1000)
+        self.assertFalse(rta.has_airborne_piece())
+        self.assertEqual(board.render(), "wK . .")
+
+    def test_reversal_capturing_enemy_king_sets_king_was_captured(self):
+        board = Board([["wR", "bK", "."]], self.config)
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("wR", (0, 0))
+        rta.start_motion("bK", (0, 1), (0, 0))  # enemy king arrives, gets reversed/captured
+        rta.advance_time(1000)
+        self.assertTrue(rta.king_was_captured())
+        self.assertEqual(board.render(), "wR . .")
 
     def test_start_motion_marks_active_and_leaves_board_unchanged(self):
         self.rta.start_motion("wR", (0, 0), (0, 2))
@@ -733,6 +816,109 @@ class TestRealTimeArbiter(unittest.TestCase):
         validator = MoveValidator(board, self.config)
         # (0,1) -> (0,2): sideways -- no pawn ray permits dr=0, but legal for a queen.
         self.assertTrue(validator.is_legal((0, 1), (0, 2)))
+
+
+class TestGameJump(unittest.TestCase):
+    def test_jump_starts_airborne_state(self):
+        config = Config()
+        board = Board([["wK", ".", "."]], config)
+        game = Game(board, config)
+        game.jump(50, 50)  # (0,0)
+        self.assertTrue(game._rta.is_airborne((0, 0)))
+        self.assertEqual(board.render(), "wK . .")
+
+    def test_moving_piece_cannot_jump(self):
+        config = Config()
+        board = Board([["wR", ".", "."]], config)
+        game = Game(board, config)
+        game.click(50, 50)   # select wR at (0,0)
+        game.click(150, 50)  # request move to (0,1): starts a motion
+        game.jump(50, 50)    # attempt to jump the now-moving wR
+        self.assertFalse(game._rta.has_airborne_piece())
+
+    def test_jump_on_empty_cell_does_nothing(self):
+        config = Config()
+        board = Board([["wK", ".", "."]], config)
+        game = Game(board, config)
+        game.jump(150, 50)  # (0,1) is empty
+        self.assertFalse(game._rta.has_airborne_piece())
+
+    def test_second_jump_rejected_while_one_active(self):
+        config = Config()
+        board = Board([["wK", "wR", "."]], config)
+        game = Game(board, config)
+        game.jump(50, 50)    # wK at (0,0) jumps
+        game.jump(150, 50)   # attempt to also jump wR at (0,1)
+        self.assertTrue(game._rta.is_airborne((0, 0)))
+        self.assertFalse(game._rta.is_airborne((0, 1)))
+
+    def test_airborne_piece_cannot_be_moved(self):
+        config = Config()
+        board = Board([["wR", ".", "."]], config)
+        game = Game(board, config)
+        game.jump(50, 50)  # wR at (0,0) is airborne
+        reason = game._request_move((0, 0), (0, 1))
+        self.assertEqual(reason, "airborne")
+        self.assertEqual(board.render(), "wR . .")
+
+    def test_jump_rejected_after_game_over(self):
+        config = Config()
+        board = Board([["wR", "bK", "."]], config)
+        game = Game(board, config)
+        game.click(50, 50)
+        game.click(150, 50)  # captures bK
+        game.wait(wait_for(1))
+        self.assertEqual(board.render(), ". wR .")  # game over now
+
+        game.jump(150, 50)  # attempt to jump the winning wR
+        self.assertFalse(game._rta.has_airborne_piece())
+
+    def test_jump_outside_board_ignored(self):
+        config = Config()
+        board = Board([["wK", "."]], config)
+        game = Game(board, config)
+        game.jump(999, 999)
+        self.assertFalse(game._rta.has_airborne_piece())
+        self.assertEqual(board.render(), "wK .")
+
+    def test_jump_command_dispatches_through_main_run(self):
+        fixture = (
+            "Board:\nwK . .\nCommands:\n"
+            "jump 50 50\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wK . .\n")
+
+
+class TestJumpIntegration(unittest.TestCase):
+    def test_jump_reversal_matches_vpl_test_2(self):
+        jump_x, jump_y = cell_center(0, 0)
+        src_x, src_y = cell_center(1, 0)
+        dst_x, dst_y = cell_center(0, 0)
+        fixture = (
+            "Board:\nwK bR .\nCommands:\n"
+            f"jump {jump_x} {jump_y}\n"
+            f"click {src_x} {src_y}\n"
+            f"click {dst_x} {dst_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), "wK . .\n")
+
+    def test_jump_with_no_arrival_lands_and_can_move_again(self):
+        jump_x, jump_y = cell_center(0, 0)
+        src_x, src_y = cell_center(0, 0)
+        dst_x, dst_y = cell_center(1, 0)
+        fixture = (
+            "Board:\nwK . .\nCommands:\n"
+            f"jump {jump_x} {jump_y}\n"
+            f"wait {wait_for(1)}\n"
+            f"click {src_x} {src_y}\n"
+            f"click {dst_x} {dst_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". wK .\n")
 
 
 class TestGameMotionWiring(unittest.TestCase):

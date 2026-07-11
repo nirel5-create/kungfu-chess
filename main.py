@@ -38,6 +38,8 @@ def dispatch(game, command, out):
         game.click(int(parts[1]), int(parts[2]))
     elif parts[0] == "wait" and len(parts) == 2:
         game.wait(int(parts[1]))
+    elif parts[0] == "jump" and len(parts) == 3:
+        game.jump(int(parts[1]), int(parts[2]))
     # anything else -> ignored
 
 

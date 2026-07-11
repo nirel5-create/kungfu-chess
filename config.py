@@ -53,6 +53,7 @@ class Config:
         piece_speed_ms=1000,
         king_type="K",
         promotions=None,
+        jump_ms=1000,
     ):
         self.cell_size = cell_size
         self.colors = colors
@@ -69,6 +70,8 @@ class Config:
         # opposite color's start row (iteration 9). Data, not an engine
         # special case -- a custom game can remap this freely.
         self.promotions = {"wP": "wQ", "bP": "bQ"} if promotions is None else promotions
+        # ms a piece stays airborne after `jump` (iteration 10).
+        self.jump_ms = jump_ms
 
     def is_valid_token(self, token):
         if token == self.empty:

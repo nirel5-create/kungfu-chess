@@ -38,11 +38,28 @@ class Game:
             return "game_over"  # board untouched, nothing else checked
         if self._rta.has_active_motion():
             return "motion_in_progress"  # board untouched, no motion started
+        if self._rta.is_airborne(src):
+            return "airborne"  # protects rule 2: a jumping piece does not move
         if not self._validator.is_legal(src, dst):
             return None  # illegal moves are silently ignored
         piece = self._board.piece_at(*src)
         self._rta.start_motion(piece, src, dst)
         return None
+
+    def jump(self, x, y):
+        cell = self._pixel_to_cell(x, y)
+        if not self._board.in_bounds(*cell):
+            return  # outside the board -> ignored, mirrors click()
+        if self._game_over:
+            return  # board/RTA untouched once the game has ended
+        piece = self._board.piece_at(*cell)
+        if piece is None:
+            return  # rule 6: nothing there to jump (captured/empty cell)
+        if self._rta.is_moving(cell):
+            return  # rule 5: a moving piece cannot jump
+        if self._rta.has_airborne_piece():
+            return  # one active jump at a time (mirrors motion_in_progress)
+        self._rta.start_jump(piece, cell)
 
     def wait(self, ms):
         self._rta.advance_time(ms)
