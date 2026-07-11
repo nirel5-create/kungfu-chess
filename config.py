@@ -1,7 +1,8 @@
-# Direction vectors used to build the standard chess movement patterns.
+# Default direction vectors for the standard chess movement patterns --
+# overridable via Config(orthogonal_deltas=..., diagonal_deltas=...,
+# knight_deltas=...) for custom piece geometry, no engine change needed.
 _ORTHOGONAL = ((-1, 0), (1, 0), (0, -1), (0, 1))
 _DIAGONAL = ((-1, -1), (-1, 1), (1, -1), (1, 1))
-_ALL_DIRECTIONS = _ORTHOGONAL + _DIAGONAL
 _KNIGHT_DELTAS = (
     (-2, -1), (-2, 1), (-1, -2), (-1, 2),
     (1, -2), (1, 2), (2, -1), (2, 1),
@@ -11,29 +12,30 @@ _KNIGHT_DELTAS = (
 def _pawn_rules(direction):
     # direction: -1 = up the board (white), +1 = down the board (black).
     return [
-        (direction, 0, 1, False, "empty", None),       # forward one, always
-        (direction, 0, 2, False, "empty", direction),  # forward two, only from start row
-        (direction, -1, 1, False, "enemy", None),      # capture diagonally
-        (direction, 1, 1, False, "enemy", None),
+        (direction, 0, 1, False, "empty", False),   # forward one, always
+        (direction, 0, 2, False, "empty", True),    # forward two, only from start row
+        (direction, -1, 1, False, "enemy", False),  # capture diagonally
+        (direction, 1, 1, False, "enemy", False),
     ]
 
 
-def _default_movement():
-    # Ray tuple: (dr, dc, max_steps, can_jump, target, from_row).
+def _default_movement(orthogonal, diagonal, knight_deltas):
+    # Ray tuple: (dr, dc, max_steps, can_jump, target, gated).
     # max_steps=None means "slide until blocked or off-board".
     # target: "any" (empty or enemy ok), "empty" (must be unoccupied),
     # or "enemy" (must hold an opposing piece) -- lets move geometry
     # and capture geometry differ (needed for pawns).
-    # from_row: None means always available; any other value means the
-    # ray only applies when the mover sits on ITS OWN start row
-    # (Config.pawn_start_row) -- lets reach depend on position with no
+    # gated: False means always available; True means the ray only
+    # applies when the mover sits on ITS OWN start row
+    # (Config.start_row) -- lets reach depend on position with no
     # branching on piece type anywhere in the engine.
+    all_directions = orthogonal + diagonal
     return {
-        "K": [(dr, dc, 1, False, "any", None) for dr, dc in _ALL_DIRECTIONS],
-        "Q": [(dr, dc, None, False, "any", None) for dr, dc in _ALL_DIRECTIONS],
-        "R": [(dr, dc, None, False, "any", None) for dr, dc in _ORTHOGONAL],
-        "B": [(dr, dc, None, False, "any", None) for dr, dc in _DIAGONAL],
-        "N": [(dr, dc, 1, True, "any", None) for dr, dc in _KNIGHT_DELTAS],
+        "K": [(dr, dc, 1, False, "any", False) for dr, dc in all_directions],
+        "Q": [(dr, dc, None, False, "any", False) for dr, dc in all_directions],
+        "R": [(dr, dc, None, False, "any", False) for dr, dc in orthogonal],
+        "B": [(dr, dc, None, False, "any", False) for dr, dc in diagonal],
+        "N": [(dr, dc, 1, True, "any", False) for dr, dc in knight_deltas],
         "wP": _pawn_rules(-1),
         "bP": _pawn_rules(1),
     }
@@ -54,23 +56,30 @@ class Config:
         king_type="K",
         promotions=None,
         jump_ms=1000,
+        orthogonal_deltas=_ORTHOGONAL,
+        diagonal_deltas=_DIAGONAL,
+        knight_deltas=_KNIGHT_DELTAS,
     ):
         self.cell_size = cell_size
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty
-        # movement[piece_letter] -> list of ray tuples (dr, dc, max_steps, can_jump).
-        # Missing entry = unrestricted (any dst legal).
-        self.movement = _default_movement() if movement is None else movement
-        # ms to cross one cell; N cells = N * piece_speed_ms (iteration 5).
+        # movement[piece_letter] -> ray tuples; see _default_movement() for the
+        # exact shape. Missing entry = unrestricted (any dst legal).
+        self.movement = (
+            _default_movement(orthogonal_deltas, diagonal_deltas, knight_deltas)
+            if movement is None
+            else movement
+        )
+        # ms to cross one cell; N cells = N * piece_speed_ms.
         self.piece_speed_ms = piece_speed_ms
-        # Which piece type ends the game when captured (iteration 8).
+        # Which piece type ends the game when captured.
         self.king_type = king_type
         # promotions[piece_token] -> token it becomes on arrival at the
-        # opposite color's start row (iteration 9). Data, not an engine
-        # special case -- a custom game can remap this freely.
+        # opposite color's start row. Data, not an engine special case --
+        # a custom game can remap this freely.
         self.promotions = {"wP": "wQ", "bP": "bQ"} if promotions is None else promotions
-        # ms a piece stays airborne after `jump` (iteration 10).
+        # ms a piece stays airborne after `jump`.
         self.jump_ms = jump_ms
 
     def is_valid_token(self, token):
@@ -91,16 +100,22 @@ class Config:
         steps = max(abs(dst[0] - src[0]), abs(dst[1] - src[1]))
         return steps * self.piece_speed_ms
 
-    def pawn_start_row(self, color, board):
+    def _is_first_color(self, color):
+        # ASSUMES exactly two configured colors (self.colors) -- the only
+        # case this project needs. A 3+ color variant would need a
+        # different resolution rule here; not supported.
+        return color == self.colors[0]
+
+    def start_row(self, color, board):
         # White (colors[0]) starts at the bottom edge; black at the top.
-        return board.rows - 1 if color == self.colors[0] else 0
+        return board.rows - 1 if self._is_first_color(color) else 0
 
     def promotion_target(self, piece, arrival_row, board):
         promoted = self.promotions.get(piece)
         if promoted is None:
             return None
         # A pawn promotes on arrival at the row where the OPPOSITE color
-        # starts -- reuses pawn_start_row, no separate row math needed.
+        # starts -- reuses start_row, no separate row math needed.
         color = piece[0]
-        opposite = self.colors[1] if color == self.colors[0] else self.colors[0]
-        return promoted if arrival_row == self.pawn_start_row(opposite, board) else None
+        opposite = self.colors[1] if self._is_first_color(color) else self.colors[0]
+        return promoted if arrival_row == self.start_row(opposite, board) else None

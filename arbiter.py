@@ -3,8 +3,9 @@ from jump import Jump
 
 
 class RealTimeArbiter:
-    """Owns active-motion state and simulated time. Board never sees a
-    Motion; RTA applies board.move only at arrival."""
+    """Owns active-motion and airborne-jump state, and simulated time.
+    Board never sees a Motion or Jump; RTA applies board.move/set_piece
+    only at arrival."""
 
     def __init__(self, board, config):
         self._board = board
@@ -48,9 +49,7 @@ class RealTimeArbiter:
             self._active_motion = None
             return [motion]
         occupant = self._board.piece_at(*motion.destination)
-        self._king_captured = (
-            occupant is not None and occupant[1] == self._config.king_type
-        )
+        self._king_captured = occupant is not None and self._is_king(occupant)
         self._board.move(motion.source, motion.destination)
         promoted = self._config.promotion_target(
             motion.piece, motion.destination[0], self._board
@@ -68,7 +67,7 @@ class RealTimeArbiter:
             and motion.arrival_time <= airborne.end_time
             and not self._config.same_color(motion.piece, airborne.piece)
         ):
-            self._king_captured = motion.piece[1] == self._config.king_type
+            self._king_captured = self._is_king(motion.piece)
             self._board.set_piece(motion.source, self._config.empty)  # arriver vanishes mid-air
             self._airborne = None  # jump resolved via capture; piece lands immediately
             return True
@@ -77,6 +76,9 @@ class RealTimeArbiter:
     def _resolve_jump_timeout(self):
         if self._airborne is not None and self._clock >= self._airborne.end_time:
             self._airborne = None
+
+    def _is_king(self, piece):
+        return piece[1] == self._config.king_type
 
     def king_was_captured(self):
         return self._king_captured

@@ -231,9 +231,13 @@ class TestUnits(unittest.TestCase):
             self.assertIn(piece, self.config.movement)
         self.assertNotIn("P", self.config.movement)
 
+    def test_custom_direction_deltas_change_default_movement(self):
+        custom = Config(orthogonal_deltas=((0, 1),))  # a rook that can only ever move right
+        self.assertEqual(custom.movement["R"], [(0, 1, None, False, "any", False)])
+
     def test_config_movement_override(self):
-        custom = Config(movement={"X": [(0, 1, 1, False)]})
-        self.assertEqual(custom.movement, {"X": [(0, 1, 1, False)]})
+        custom = Config(movement={"X": [(0, 1, 1, False, "any", None)]})
+        self.assertEqual(custom.movement, {"X": [(0, 1, 1, False, "any", None)]})
 
     def test_travel_time_one_cell_orthogonal(self):
         self.assertEqual(self.config.travel_time((0, 0), (0, 1)), 1000)
@@ -284,7 +288,7 @@ class TestUnits(unittest.TestCase):
 
     def test_is_legal_unrestricted_when_no_movement_rule_defined(self):
         # Extensibility (ctd_rules.md §5): a custom piece type with no rule
-        # entry is unrestricted, same as pre-pawn-rules iteration-3 behavior.
+        # entry is unrestricted.
         custom = Config(piece_types=("K", "X"), movement={"K": self.config.movement["K"]})
         board = Board([["wX", "."]], custom)
         validator = MoveValidator(board, custom)
@@ -721,6 +725,14 @@ class TestRealTimeArbiter(unittest.TestCase):
         self.assertTrue(rta.king_was_captured())
         self.assertEqual(board.render(), "wR . .")
 
+    def test_reversal_skips_promotion_for_arriving_pawn(self):
+        board = Board([["bR", "."], ["wP", "."]], self.config)  # 2 rows
+        rta = RealTimeArbiter(board, self.config)
+        rta.start_jump("bR", (0, 0))  # end_time = 1000
+        rta.start_motion("wP", (1, 0), (0, 0))  # 1 cell -> 1000ms, arrival_time = 1000, promotion row
+        rta.advance_time(1000)
+        self.assertEqual(board.render(), "bR .\n. .")  # pawn captured mid-air, no promotion
+
     def test_start_motion_marks_active_and_leaves_board_unchanged(self):
         self.rta.start_motion("wR", (0, 0), (0, 2))
         self.assertTrue(self.rta.has_active_motion())
@@ -858,7 +870,7 @@ class TestGameJump(unittest.TestCase):
         game = Game(board, config)
         game.jump(50, 50)  # wR at (0,0) is airborne
         reason = game._request_move((0, 0), (0, 1))
-        self.assertEqual(reason, "airborne")
+        self.assertEqual(reason, Game.REASON_AIRBORNE)
         self.assertEqual(board.render(), "wR . .")
 
     def test_jump_rejected_after_game_over(self):
@@ -943,7 +955,7 @@ class TestGameMotionWiring(unittest.TestCase):
         self.assertEqual(board.render(), "wR . bR")  # not arrived yet
 
         reason = game._request_move((0, 0), (0, 1))
-        self.assertEqual(reason, "motion_in_progress")
+        self.assertEqual(reason, Game.REASON_MOTION_IN_PROGRESS)
         self.assertEqual(board.render(), "wR . bR")  # still untouched
 
     def test_piece_moves_again_immediately_after_arrival(self):
@@ -981,7 +993,7 @@ class TestGameMotionWiring(unittest.TestCase):
         self.assertEqual(board.render(), ". wR .")
 
         reason = game._request_move((0, 1), (0, 2))  # wR now at (0,1), legal-looking move
-        self.assertEqual(reason, "game_over")
+        self.assertEqual(reason, Game.REASON_GAME_OVER)
         self.assertEqual(board.render(), ". wR .")  # untouched
 
     def test_non_king_capture_does_not_end_the_game(self):

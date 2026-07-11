@@ -1,7 +1,7 @@
 class Board:
     """Owns the storage. Nobody outside asks how a cell is stored;
-    they ask piece_at / move / render. Swap this for a bitboard later
-    and no other class changes."""
+    they ask piece_at / move / set_piece / render. Swap this for a
+    bitboard later and no other class changes."""
 
     def __init__(self, grid, config):
         self._grid = grid  # list[list[str]] -- private
