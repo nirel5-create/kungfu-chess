@@ -1,7 +1,7 @@
 # ============================================================================
 #  Kung-Fu Chess
 #  Repo:    https://github.com/nirel5-create/kungfu-chess
-#  Report:  https://nirel5-create.github.io/kungfu-chess/ARCHITECTURE_REPORT.html
+#  Report:  https://nirel5-create.github.io/kungfu-chess/kungfu_chess_report.html
 #           (interactive, rendered architecture report)
 # ============================================================================
 import sys
