@@ -1,9 +1,9 @@
 # Repo: https://github.com/nirel5-create/kungfu-chess
 import sys
 
-from config import Config
-from board import Board
-from game import Game
+from model.config import Config
+from model.board import Board
+from engine.game import Game
 
 # Protocol output strings (single source of truth, never inline magic strings).
 ERROR_ROW_WIDTH = "ERROR ROW_WIDTH_MISMATCH"
@@ -38,6 +38,8 @@ def dispatch(game, command, out):
         game.click(int(parts[1]), int(parts[2]))
     elif parts[0] == "wait" and len(parts) == 2:
         game.wait(int(parts[1]))
+    elif parts[0] == "jump" and len(parts) == 3:
+        game.jump(int(parts[1]), int(parts[2]))
     # anything else -> ignored
 
 

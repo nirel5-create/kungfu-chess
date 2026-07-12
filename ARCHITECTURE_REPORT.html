@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kung-Fu Chess — מפת הארכיטקטורה</title>
+<style>
+  :root{
+    --ink:#12100e;          /* near-black board ink */
+    --paper:#f2ede3;        /* warm board paper */
+    --line:#d8cfbe;         /* hairline */
+    --white-sq:#e9e0cf;
+    --dark-sq:#3a352d;
+    --accent:#b1442e;       /* lacquer red — the "kung-fu" strike */
+    --accent-soft:#e7c9a8;
+    --gold:#c9972b;
+    --ok:#3f7d54;
+    --model:#2f6f7d;        /* teal   — data layer */
+    --rules:#7a5aa8;        /* violet — legality */
+    --realtime:#b1442e;     /* red    — time/motion */
+    --engine:#c9972b;       /* gold   — orchestration */
+    --io:#556070;           /* slate  — I/O */
+    --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono","Menlo",monospace;
+    --serif:"Iowan Old Style","Palatino Linotype","Georgia",serif;
+    --sans:"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;background:var(--paper);color:var(--ink);
+    font-family:var(--sans);line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px;}
+
+  /* ---------- hero ---------- */
+  header.hero{
+    position:relative;overflow:hidden;
+    background:
+      repeating-conic-gradient(var(--dark-sq) 0% 25%, var(--white-sq) 0% 50%)
+      50% / 92px 92px;
+    border-bottom:3px solid var(--ink);
+  }
+  header.hero::after{
+    content:"";position:absolute;inset:0;
+    background:linear-gradient(180deg,rgba(242,237,227,.06),rgba(242,237,227,.97));
+  }
+  .hero-inner{position:relative;z-index:2;padding:64px 22px 40px;max-width:1000px;margin:0 auto;}
+  .eyebrow{
+    font-family:var(--mono);font-size:.74rem;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--accent);font-weight:700;
+    display:flex;gap:10px;align-items:center;
+  }
+  .eyebrow::before{content:"";width:26px;height:2px;background:var(--accent);display:inline-block;}
+  h1.title{
+    font-family:var(--serif);font-weight:700;
+    font-size:clamp(2.4rem,6vw,4.1rem);line-height:1.02;
+    margin:.28em 0 .1em;letter-spacing:-.01em;
+  }
+  h1.title .kf{color:var(--accent);}
+  .subtitle{font-size:1.05rem;max-width:56ch;color:#443f37;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:26px;margin-top:26px;}
+  .stat{background:var(--ink);color:var(--paper);border-radius:2px;padding:12px 18px;}
+  .stat b{font-family:var(--serif);font-size:1.5rem;display:block;line-height:1;}
+  .stat span{font-family:var(--mono);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;opacity:.72;}
+
+  /* ---------- section frame ---------- */
+  section{padding:52px 0;border-bottom:1px solid var(--line);}
+  .sec-label{
+    font-family:var(--mono);font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--accent);font-weight:700;margin-bottom:6px;
+  }
+  h2{font-family:var(--serif);font-size:clamp(1.6rem,3.4vw,2.3rem);margin:.1em 0 .5em;letter-spacing:-.01em;}
+  h3{font-family:var(--serif);font-size:1.25rem;margin:1.4em 0 .3em;}
+  p{max-width:70ch;}
+  .lead{font-size:1.08rem;color:#3b362f;}
+
+  /* ---------- intuition cards ---------- */
+  .intuition{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;margin-top:26px;}
+  .icard{background:#fff;border:1px solid var(--line);border-radius:3px;padding:18px 18px 16px;}
+  .icard .k{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:700;}
+  .icard h4{font-family:var(--serif);font-size:1.1rem;margin:.35em 0 .3em;}
+  .icard p{font-size:.92rem;margin:0;color:#4a453d;}
+
+  /* ---------- pipeline ---------- */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:30px 0 8px;font-family:var(--mono);}
+  .pstep{flex:1;min-width:120px;background:#fff;border:1px solid var(--ink);padding:12px 10px;text-align:center;position:relative;}
+  .pstep + .pstep{border-right:none;}
+  .pstep .n{font-size:.62rem;letter-spacing:.14em;color:var(--accent);}
+  .pstep .m{font-size:.86rem;font-weight:700;margin-top:2px;}
+  .pstep .d{font-size:.66rem;color:#6b655c;font-family:var(--sans);margin-top:3px;}
+  .pipe-note{font-size:.86rem;color:#6b655c;}
+
+  /* ---------- layer stack ---------- */
+  .layers{margin-top:26px;display:flex;flex-direction:column;gap:12px;}
+  .layer{border-radius:3px;border:1px solid var(--line);overflow:hidden;background:#fff;}
+  .layer-head{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;user-select:none;}
+  .layer-head:hover{background:#faf6ee;}
+  .swatch{width:14px;height:14px;border-radius:2px;flex:none;}
+  .layer-head .lname{font-family:var(--mono);font-weight:700;font-size:.95rem;}
+  .layer-head .lfile{font-family:var(--mono);font-size:.72rem;color:#8a8378;margin-inline-start:auto;}
+  .layer-head .caret{transition:transform .2s;color:var(--accent);font-weight:700;margin-inline-start:10px;}
+  .layer.open .caret{transform:rotate(90deg);}
+  .layer-body{display:none;padding:2px 16px 16px;border-top:1px dashed var(--line);}
+  .layer.open .layer-body{display:block;}
+  .owns{font-size:.9rem;color:#463f36;margin:10px 0 4px;}
+  .owns b{color:var(--ink);}
+
+  table.fns{width:100%;border-collapse:collapse;margin-top:8px;font-size:.88rem;}
+  table.fns th,table.fns td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
+  table.fns th{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:#8a8378;font-weight:700;}
+  table.fns td.fn{font-family:var(--mono);color:var(--accent);white-space:nowrap;font-size:.82rem;}
+
+  /* ---------- doctrine chips ---------- */
+  .chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .chip{background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:.74rem;
+        padding:7px 12px;border-radius:2px;letter-spacing:.04em;}
+  .chip b{color:var(--accent-soft);}
+
+  /* ---------- quiz ---------- */
+  .quiz-hero{background:var(--ink);color:var(--paper);border-bottom:none;}
+  .quiz-hero .sec-label{color:var(--accent-soft);}
+  .quiz-hero h2{color:#fff;}
+  .quiz-hero p{color:#cfc7ba;}
+  .q{background:#1c1a17;border:1px solid #33302a;border-radius:4px;padding:18px 20px;margin:16px 0;}
+  .q .qn{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;color:var(--gold);}
+  .q h4{font-family:var(--serif);color:#fff;font-size:1.14rem;margin:.3em 0 .7em;font-weight:600;}
+  .opt{display:block;background:#26231f;border:1px solid #3a3630;color:#e8e2d6;
+       padding:11px 14px;border-radius:3px;margin:7px 0;cursor:pointer;font-size:.94rem;
+       transition:background .15s,border-color .15s;}
+  .opt:hover{background:#302c27;}
+  .opt.correct{border-color:var(--ok);background:#213328;color:#cfe9d6;}
+  .opt.wrong{border-color:var(--accent);background:#33211e;color:#f0cdc4;}
+  .opt .mark{font-family:var(--mono);font-weight:700;margin-inline-end:10px;color:var(--gold);}
+  .explain{display:none;margin-top:10px;font-size:.9rem;color:#bcb4a6;border-inline-start:3px solid var(--gold);padding:8px 12px;background:#211f1b;}
+  .q.answered .explain{display:block;}
+  .scorebar{position:sticky;bottom:0;z-index:20;background:var(--accent);color:#fff;
+            font-family:var(--mono);text-align:center;padding:13px;letter-spacing:.06em;
+            font-size:.95rem;box-shadow:0 -4px 20px rgba(0,0,0,.25);}
+  .scorebar b{font-size:1.15rem;}
+  .verdict{font-weight:700;}
+
+  footer{padding:30px 22px 50px;text-align:center;color:#8a8378;font-family:var(--mono);font-size:.74rem;letter-spacing:.08em;}
+
+  @media (max-width:560px){
+    .pstep{min-width:calc(50% - 1px);}
+    .layer-head .lfile{display:none;}
+  }
+  @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto;transition:none;}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Kung-Fu Chess · דוח ארכיטקטורה</div>
+    <h1 class="title">שחמט ש<span class="kf">לא מחכה</span> לתורך</h1>
+    <p class="subtitle">מנוע משחק בזמן-אמת שבו כלים נעים במקביל, לוקח לתנועה זמן, ומלך אחד מפיל את המשחק. בנוי ב-11 איטרציות סביב עיקרון אחד: <b>חוקים הם דאטה, לא קוד.</b></p>
+    <div class="stat-row">
+      <div class="stat"><b>8</b><span>מודולי מקור</span></div>
+      <div class="stat"><b>115</b><span>טסטים עוברים</span></div>
+      <div class="stat"><b>100%</b><span>כיסוי קוד</span></div>
+      <div class="stat"><b>5</b><span>שכבות אחריות</span></div>
+    </div>
+  </div>
+</header>
+
+<!-- ===================== CONTEXT ===================== -->
+<section id="context">
+  <div class="wrap">
+    <div class="sec-label">הקשר · מה זה בכלל</div>
+    <h2>מה בנינו, ולמה זה לא שחמט רגיל</h2>
+    <p class="lead">Kung-Fu Chess הוא שחמט <b>בזמן-אמת</b>: אין תורות. שחקן בוחר כלי ולוחץ על יעד, והכלי <b>נע לאורך זמן</b> אל היעד במהירות קבועה (משבצת = 1000ms). הלוח הלוגי משתנה <b>רק כשכלי מגיע</b>, לא ברגע הלחיצה. מלך שנאכל מסיים את המשחק. וכלי יכול "לקפוץ" במקום כדי לאכול אויב שמנסה לנחות עליו.</p>
+    <p>אבל הפרויקט האמיתי הוא לא המשחק — הוא <b>בנייה מקצועית של תוכנה</b>: לפרק רעיון מעורפל לצעדים קטנים ובדיקים, להפריד שכבות, לכתוב טסטים לפני קוד, ולהשאיר את הקוד פתוח להרחבה. כל החלטה נבחנה מול שאלה אחת: "אם משתמש ירצה להמציא משחק משלו — 'שחמט של שלומי' — האם הוא צריך לכתוב קוד, או רק לשנות דאטה?" התשובה תמיד: <b>רק דאטה.</b></p>
+
+    <div class="intuition">
+      <div class="icard"><div class="k">האינטואיציה</div><h4>הלוח הוא רק "מה קיים"</h4><p>הלוח לא יודע חוקי שחמט, לא יודע פיקסלים, ולא יודע זמן. הוא רק מחזיק איזה כלי בכל תא. כל השאר שואל אותו.</p></div>
+      <div class="icard"><div class="k">האינטואיציה</div><h4>תנועה לוקחת זמן</h4><p>מהלך לא קורה מיד. הוא "נשלח", וגורם-הזמן (RealTimeArbiter) מיישב אותו כשמגיע רגע-ההגעה. עד אז הלוח לא זז.</p></div>
+      <div class="icard"><div class="k">האינטואיציה</div><h4>חוקים = טבלת דאטה</h4><p>איך כל כלי זז יושב כטבלת מספרים ב-Config. המנוע מפרש טבלה — הוא לא מכיר "צריח" או "חייל" בשם.</p></div>
+      <div class="icard"><div class="k">האינטואיציה</div><h4>כל שכבה עובדת אחת</h4><p>מי בודק חוקיות ≠ מי מזיז ≠ מי סופר זמן ≠ מי מנהל בחירה. אחריות אחת לכל מחלקה.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== FLOW ===================== -->
+<section id="flow">
+  <div class="wrap">
+    <div class="sec-label">התהליך · איך פקודה זורמת</div>
+    <h2>המסע של פקודה אחת</h2>
+    <p>כשה-VPL שולח <code>click&nbsp;150&nbsp;50</code> או <code>jump&nbsp;50&nbsp;50</code>, הפקודה עוברת בין השכבות — כל אחת עושה את החלק שלה ומעבירה הלאה. אף שכבה לא עוקפת את זו שמעליה.</p>
+    <div class="pipe">
+      <div class="pstep"><div class="n">01</div><div class="m">main.dispatch</div><div class="d">מפענח את הפקודה</div></div>
+      <div class="pstep"><div class="n">02</div><div class="m">Game</div><div class="d">בחירה + guards</div></div>
+      <div class="pstep"><div class="n">03</div><div class="m">MoveValidator</div><div class="d">חוקי?</div></div>
+      <div class="pstep"><div class="n">04</div><div class="m">RealTimeArbiter</div><div class="d">מתחיל תנועה</div></div>
+      <div class="pstep"><div class="n">05</div><div class="m">Board</div><div class="d">משתנה בהגעה</div></div>
+    </div>
+    <p class="pipe-note">ה-<code>wait&nbsp;ms</code> מקדם את השעון בתוך RealTimeArbiter — וזה מה שגורם למהלכים "להגיע" ולקפיצות "לפוג". הלוח משתנה רק כאן, ברגע ההגעה.</p>
+  </div>
+</section>
+
+<!-- ===================== LAYERS ===================== -->
+<section id="layers">
+  <div class="wrap">
+    <div class="sec-label">המבנה · חמש שכבות, שמונה קבצים</div>
+    <h2>מפת הקבצים — לחצי על שכבה כדי לפתוח</h2>
+    <p>הפרויקט מסודר לפי אחריות. כל תיקייה = שכבה, כל קובץ = מחלקה אחת. הטבלאות מתארות את תפקיד כל פונקציה בקצרה.</p>
+
+    <div class="layers">
+
+      <!-- MODEL -->
+      <div class="layer">
+        <div class="layer-head"><span class="swatch" style="background:var(--model)"></span>
+          <span class="lname">model/ — נתונים טהורים</span>
+          <span class="lfile">config · board · motion · jump</span>
+          <span class="caret">▸</span></div>
+        <div class="layer-body">
+          <p class="owns"><b>אחראית על:</b> מה קיים בעולם — גודל תא, אלפבית כלים, מיקומים, וחוקי-התנועה כדאטה. <b>לא יודעת:</b> פיקסלים, חוקיות, זמן, ציור.</p>
+
+          <h3 style="margin-top:14px">config.py — <span style="font-family:var(--mono);font-size:.9rem">Config</span></h3>
+          <p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">מקור-האמת היחיד לכל דבר שאפשר לכוונן. "שחמט של שלומי" חי כאן.</p>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">__init__</td><td>מקבלת את כל הפרמטרים המכווננים (גודל תא, צבעים, מהירות, זמן-קפיצה, וקטורי-כיוון) — כולם עם ברירת-מחדל וניתנים לדריסה.</td></tr>
+            <tr><td class="fn">is_valid_token</td><td>בודקת שמחרוזת-תא חוקית: או ריק, או צבע+סוג תקינים.</td></tr>
+            <tr><td class="fn">same_color</td><td>האם שני כלים מאותו צבע (לפי התו הראשון).</td></tr>
+            <tr><td class="fn">travel_time</td><td>כמה ms לוקח מהלך: מרחק-צ'בישב × מהירות. אלכסון = כמו ישר.</td></tr>
+            <tr><td class="fn">start_row</td><td>שורת-הפתיחה של צבע (נגזרת מגובה הלוח) — משמשת גם לצעד-כפול וגם לקידום.</td></tr>
+            <tr><td class="fn">promotion_target</td><td>לאיזה כלי חייל מתקדם בהגעה לשורה הרחוקה — או None. דאטה, לא לוגיקה קשיחה.</td></tr>
+            <tr><td class="fn">_is_first_color</td><td>עוזר פרטי: האם זה הצבע הראשון. מרכז את הנחת-שני-הצבעים במקום אחד מוצהר.</td></tr>
+            <tr><td class="fn">_default_movement<br>_pawn_rules</td><td>בונות את טבלת חוקי-התנועה כ-rays (dr,dc,steps,jump,target,gated). זה הלב של "חוקים=דאטה".</td></tr>
+          </table>
+
+          <h3>board.py — <span style="font-family:var(--mono);font-size:.9rem">Board</span></h3>
+          <p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">מחזיק את התפוסה הלוגית. אף אחד לא יודע איך הוא מאחסן — רק שואל.</p>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">rows / cols</td><td>מימדי הלוח, נגזרים מהמבנה הפנימי.</td></tr>
+            <tr><td class="fn">in_bounds</td><td>האם (שורה,עמודה) בתוך הלוח.</td></tr>
+            <tr><td class="fn">piece_at</td><td>מה הכלי בתא — או None אם ריק.</td></tr>
+            <tr><td class="fn">move</td><td>מזיז כלי ממקור ליעד (מניח שכבר אומת). מרוקן את המקור.</td></tr>
+            <tr><td class="fn">set_piece</td><td>מציב token בתא — משמש לקידום (חייל→מלכה) ולהסרה.</td></tr>
+            <tr><td class="fn">render</td><td>מחזיר את הלוח כטקסט, לפורמט <code>print board</code>.</td></tr>
+          </table>
+
+          <h3>motion.py / jump.py — <span style="font-family:var(--mono);font-size:.9rem">Motion, Jump</span></h3>
+          <p style="font-size:.9rem;margin:.2em 0 0;color:#4a453d">שני value objects זעירים (namedtuple), דאטה טהורה. <b>Motion</b> = מהלך בתנועה (piece, source, destination, arrival_time). <b>Jump</b> = כלי באוויר (piece, cell, end_time). אין בהם לוגיקה — RealTimeArbiter מחליט מתי הם מתיישבים, והלוח לא רואה אותם כלל.</p>
+        </div>
+      </div>
+
+      <!-- RULES -->
+      <div class="layer">
+        <div class="layer-head"><span class="swatch" style="background:var(--rules)"></span>
+          <span class="lname">rules/ — חוקיות (קריאה בלבד)</span>
+          <span class="lfile">rules</span>
+          <span class="caret">▸</span></div>
+        <div class="layer-body">
+          <p class="owns"><b>אחראית על:</b> שאלה אחת — "האם המהלך מ-src ל-dst חוקי עכשיו?". <b>לא:</b> מזיזה כלים, סופרת זמן, או משנה את הלוח.</p>
+          <h3 style="margin-top:14px">rules.py — <span style="font-family:var(--mono);font-size:.9rem">MoveValidator</span></h3>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">is_legal</td><td>הלב: קורא את חוקי-התנועה של הכלי מ-Config (כדאטה), חוסם נחיתה על ידידותי, ובודק אם היעד נגיש דרך אחת ה-rays. <b>אין בו שום if על סוג-כלי.</b></td></tr>
+            <tr><td class="fn">_target_ok</td><td>האם היעד מתאים לסוג ה-ray: "any" / "empty" (רק ריק) / "enemy" (רק אויב). זה מה שמפריד תנועת-חייל מאכילת-חייל.</td></tr>
+            <tr><td class="fn">_slides_to</td><td>מחליק לאורך קרן עד היעד, ועוצר על חסימה. משרת גם צריח, גם רץ, גם צעד-כפול של חייל — בלי כפילות.</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- REALTIME -->
+      <div class="layer">
+        <div class="layer-head"><span class="swatch" style="background:var(--realtime)"></span>
+          <span class="lname">realtime/ — זמן, תנועה, קפיצה</span>
+          <span class="lfile">arbiter</span>
+          <span class="caret">▸</span></div>
+        <div class="layer-body">
+          <p class="owns"><b>אחראית על:</b> הזמן המדומה, המהלכים-בתנועה, הקפיצות, ויישוב-ההגעות. זה המקום שבו הלוח באמת משתנה. <b>לא:</b> יודע על בחירה, פיקסלים, או game-over (הוא רק <i>מדווח</i> שנאכל מלך).</p>
+          <h3 style="margin-top:14px">arbiter.py — <span style="font-family:var(--mono);font-size:.9rem">RealTimeArbiter</span></h3>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">start_motion</td><td>רושם מהלך חדש עם זמן-הגעה מחושב. הלוח עדיין לא זז.</td></tr>
+            <tr><td class="fn">start_jump</td><td>מכניס כלי למצב airborne עד clock+jump_ms.</td></tr>
+            <tr><td class="fn">advance_time</td><td>מקדם את השעון, ואז מתזמר: מיישב מהלך (אם הגיע) ומנקה קפיצה שפגה. מחזיר את ההגעות.</td></tr>
+            <tr><td class="fn">_resolve_motion</td><td>אם מהלך הגיע: בודק reversal קודם; אחרת מבצע אכילה/מלך/קידום ומזיז בלוח.</td></tr>
+            <tr><td class="fn">_reverse_if_<br>airborne_enemy</td><td>חוק-הקפיצה: אם אויב נוחת על תא של כלי-קופץ בתוך החלון — הקופץ אוכל אותו, המגיע נעלם, הלוח לא זז.</td></tr>
+            <tr><td class="fn">_resolve_jump_timeout</td><td>אם החלון נגמר בלי אויב — הכלי נוחת (יוצא מ-airborne).</td></tr>
+            <tr><td class="fn">_is_king</td><td>עוזר: האם הכלי הוא מלך (לפי Config.king_type). משמש בשתי דרכי-האכילה.</td></tr>
+            <tr><td class="fn">king_was_captured<br>has_active_motion<br>is_moving / is_airborne</td><td>שאילתות קריאה-בלבד ש-Game נשען עליהן ל-guards.</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- ENGINE -->
+      <div class="layer">
+        <div class="layer-head"><span class="swatch" style="background:var(--engine)"></span>
+          <span class="lname">engine/ — תזמור ובחירה</span>
+          <span class="lfile">game</span>
+          <span class="caret">▸</span></div>
+        <div class="layer-body">
+          <p class="owns"><b>אחראית על:</b> מכונת-המצבים של הבחירה (click ראשון בוחר, שני מזיז), ו-guards ברמת-אפליקציה (game-over, motion-in-progress, airborne). <b>לא:</b> יודעת אחסון, גאומטריית-שחמט, או מתמטיקת-זמן — מאצילה למי שאחראי.</p>
+          <h3 style="margin-top:14px">game.py — <span style="font-family:var(--mono);font-size:.9rem">Game</span></h3>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">click</td><td>ה-FSM: אין בחירה + כלי → בוחר; יש בחירה + ידידותי → מחליף; אחרת → שולח מהלך ומאפס.</td></tr>
+            <tr><td class="fn">_request_move</td><td>שער הכניסה למהלך: בודק game_over → motion_in_progress → airborne → חוקיות, ורק אז מתחיל תנועה.</td></tr>
+            <tr><td class="fn">jump</td><td>מפעיל קפיצה, אוכף את 6 חוקי-הקפיצה (בתנועה לא קופץ, תא-ריק לא קופץ, אחד בכל רגע).</td></tr>
+            <tr><td class="fn">wait</td><td>מאציל את קידום-הזמן ל-RealTimeArbiter, ואם נאכל מלך — מדליק game_over.</td></tr>
+            <tr><td class="fn">_pixel_to_cell</td><td>ממיר פיקסל→(שורה,עמודה) דרך גודל-התא מ-Config.</td></tr>
+            <tr><td class="fn">render</td><td>מעביר הלאה את פלט-הלוח.</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- IO -->
+      <div class="layer">
+        <div class="layer-head"><span class="swatch" style="background:var(--io)"></span>
+          <span class="lname">main.py — קלט/פלט ותזמור-על</span>
+          <span class="lfile">שורש הפרויקט · נקודת-כניסה</span>
+          <span class="caret">▸</span></div>
+        <div class="layer-body">
+          <p class="owns"><b>אחראית על:</b> קריאת הקלט הטקסטואלי, פענוח פקודות, ובניית המשחק. דק בכוונה — כל הלוגיקה מואצלת. <b>הזרקת-תלות:</b> <code>run(inp, out)</code> מקבל את הזרמים כארגומנטים, כדי שהטסטים יזריקו StringIO בלי monkeypatch.</p>
+          <h3 style="margin-top:14px">main.py</h3>
+          <table class="fns">
+            <tr><th>פונקציה</th><th>תפקיד בקצרה</th></tr>
+            <tr><td class="fn">parse_sections</td><td>מפצל את הקלט לחלק-לוח וחלק-פקודות (מנקה רווחים).</td></tr>
+            <tr><td class="fn">validate_board</td><td>בודק רוחב-שורות אחיד ותקינות tokens; מחזיר מחרוזת-שגיאה או None.</td></tr>
+            <tr><td class="fn">dispatch</td><td>מפעיל את הפקודה הנכונה: print / click / wait / jump (אחר → מתעלם).</td></tr>
+            <tr><td class="fn">run</td><td>המנצח: קורא, מפרסר, מוודא, בונה Game, ומריץ את כל הפקודות.</td></tr>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="chips">
+      <div class="chip"><b>DRY</b> · כל לוגיקה במקום אחד</div>
+      <div class="chip"><b>SRP</b> · מחלקה = אחריות אחת</div>
+      <div class="chip"><b>Encapsulation</b> · אף אחד לא נוגע בפנימיות</div>
+      <div class="chip"><b>Rules as Data</b> · אין if על סוג-כלי</div>
+      <div class="chip"><b>Open/Closed</b> · כלי חדש = entry, לא קוד</div>
+      <div class="chip"><b>Dependency Injection</b> · בלי monkeypatch</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== QUIZ ===================== -->
+<section id="quiz" class="quiz-hero">
+  <div class="wrap">
+    <div class="sec-label">מבחן · חובה לעבור</div>
+    <h2>שבע שאלות. חמש נכונות = עברת.</h2>
+    <p>לא על שינון — על <b>הבנת המבנה</b>. אם תעני נכון, את יכולה להסביר את הפרויקט הזה למנטורית בלי הצילומים.</p>
+
+    <div id="quizbox">
+
+      <div class="q" data-correct="b">
+        <div class="qn">שאלה 01</div>
+        <h4>מתי הלוח הלוגי משתנה אחרי <code>click</code>?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>מיד ברגע הלחיצה השנייה.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>רק כשהמהלך "מגיע", אחרי מספיק <code>wait</code>.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>ברגע ש-MoveValidator מאשר חוקיות.</div>
+        <div class="explain">הלוח משתנה רק בהגעה, בתוך <code>RealTimeArbiter.advance_time</code>. עד אז המהלך רק "בתנועה". זו כל המהות של real-time.</div>
+      </div>
+
+      <div class="q" data-correct="c">
+        <div class="qn">שאלה 02</div>
+        <h4>איפה יושבים חוקי-התנועה של צריח, ואיך המנוע יודע אותם?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>ב-MoveValidator, עם <code>if piece == "R"</code>.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>ב-Board, לצד אחסון התאים.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>כ-rays בטבלת דאטה ב-Config; המנוע מפרש טבלה, לא מכיר "צריח".</div>
+        <div class="explain">חוקים=דאטה. Config מחזיק rays לכל כלי, ו-MoveValidator מפרש אותם בלי שום if על סוג. זה מה שמאפשר "שחמט של שלומי".</div>
+      </div>
+
+      <div class="q" data-correct="a">
+        <div class="qn">שאלה 03</div>
+        <h4>מי מחזיק את דגל ה-<code>game_over</code>, ומי רק <i>מדווח</i> שנאכל מלך?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>Game מחזיק את game_over; RealTimeArbiter רק מדווח (king_was_captured).</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>Board מחזיק אותו, כי הוא רואה את הכלים.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>RealTimeArbiter מחזיק ואוכף game_over לבד.</div>
+        <div class="explain">שכבות: RTA מגלה עובדה (נאכל מלך) ומדווח. Game — שכבת-האפליקציה — מחליט מה זה אומר (game_over) ואוכף אותו ב-_request_move.</div>
+      </div>
+
+      <div class="q" data-correct="b">
+        <div class="qn">שאלה 04</div>
+        <h4>מדוע ב-<code>_resolve_motion</code> בדיקת ה-jump-reversal קורית <i>לפני</i> <code>board.move</code>?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>סתם קונבנציה, הסדר לא משנה.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>מהלך שמתבטל (הקופץ אוכל את המגיע) לא נוחת כלל — אסור להריץ עליו move/מלך/קידום.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>כדי לחסוך זמן ריצה.</div>
+        <div class="explain">ב-reversal המגיע נעלם באוויר. אם היינו קודם עושים board.move, הוא היה נוחת בטעות. לכן reversal נבדק ראשון עם return מוקדם.</div>
+      </div>
+
+      <div class="q" data-correct="c">
+        <div class="qn">שאלה 05</div>
+        <h4>מה מפריד תנועת-חייל (ישר) מאכילת-חייל (אלכסון) בטבלת ה-rays?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>שדה <code>can_jump</code>.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>מספר ה-<code>max_steps</code>.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>שדה <code>target</code>: "empty" לתנועה ישרה, "enemy" לאכילה אלכסונית.</div>
+        <div class="explain">חייל הוא הכלי הראשון שבו תנועה ≠ אכילה. השדה <code>target</code> (any/empty/enemy) הוא מה שמאפשר להביע את זה כדאטה, בלי קוד מיוחד.</div>
+      </div>
+
+      <div class="q" data-correct="a">
+        <div class="qn">שאלה 06</div>
+        <h4>למה הטסטים משתמשים ב-<code>run(inp, out)</code> עם StringIO ולא ב-monkeypatch על sys.stdin?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>Dependency Injection: מזריקים את ה-I/O כארגומנט, אז אין צורך "לשנות" את הקוד בזמן ריצה.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>כי monkeypatch לא עובד ב-Windows.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>כדי שהטסטים ירוצו מהר יותר.</div>
+        <div class="explain">monkeypatch משנה את הקוד הנבדק בזמן ריצה — אסור. DI פותר את זה נקי: run מקבל את הזרמים, והטסט מזריק StringIO ובודק את הפלט.</div>
+      </div>
+
+      <div class="q" data-correct="b">
+        <div class="qn">שאלה 07</div>
+        <h4>משתמש רוצה כלי חדש שזז 3 משבצות אלכסון ואוכל רק ישר. מה הוא צריך לשנות?</h4>
+        <div class="opt" data-k="a"><span class="mark">א</span>לכתוב מחלקה חדשה שיורשת מ-Piece עם <code>move()</code>.</div>
+        <div class="opt" data-k="b"><span class="mark">ב</span>רק להוסיף entry ב-<code>Config.movement</code> — rays עם target מתאים. אפס שינוי במנוע.</div>
+        <div class="opt" data-k="c"><span class="mark">ג</span>לערוך את MoveValidator ולהוסיף <code>if</code> לכלי החדש.</div>
+        <div class="explain">זה מבחן ה-Open/Closed. הוספת כלי = דאטה ב-Config, לא קוד. המנוע מפרש rays בלי להכיר את הכלי. זה בדיוק מה שהופך "שחמט של שלומי" לאפשרי.</div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="scorebar" id="scorebar">עני על השאלות — הציון יופיע כאן · <b id="score">0 / 7</b></div>
+
+<footer>
+  Kung-Fu Chess · 11 איטרציות · 8 מודולים · 115 טסטים · 100% כיסוי · rules-as-data<br>
+  דוח ארכיטקטורה שנוצר לסקירת המנטורית
+</footer>
+
+<script>
+(function(){
+  var total = document.querySelectorAll('.q').length;
+  var answered = {};
+  function refresh(){
+    var correct = 0, done = 0;
+    document.querySelectorAll('.q').forEach(function(q,i){
+      if(answered[i] === 'right') correct++;
+      if(answered[i]) done++;
+    });
+    var el = document.getElementById('score');
+    el.textContent = correct + ' / ' + total;
+    var bar = document.getElementById('scorebar');
+    if(done < total){
+      bar.innerHTML = 'ענית על ' + done + ' מתוך ' + total + ' · <b id="score">' + correct + ' / ' + total + '</b>';
+    } else if(correct >= 5){
+      bar.style.background = 'var(--ok)';
+      bar.innerHTML = '<span class="verdict">עברת! ' + correct + ' / ' + total + ' — את מבינה את המבנה. מוכנה למנטורית. ✓</span>';
+    } else {
+      bar.style.background = '#8a3527';
+      bar.innerHTML = '<span class="verdict">' + correct + ' / ' + total + ' — צריך 5. עברי שוב על השכבות למעלה ונסי שוב.</span>';
+    }
+  }
+  document.querySelectorAll('.q').forEach(function(q,i){
+    var right = q.getAttribute('data-correct');
+    q.querySelectorAll('.opt').forEach(function(opt){
+      opt.addEventListener('click', function(){
+        if(q.classList.contains('answered')) return;
+        q.classList.add('answered');
+        var k = opt.getAttribute('data-k');
+        if(k === right){ opt.classList.add('correct'); answered[i]='right'; }
+        else{
+          opt.classList.add('wrong'); answered[i]='wrong';
+          q.querySelector('.opt[data-k="'+right+'"]').classList.add('correct');
+        }
+        refresh();
+      });
+    });
+  });
+  // expand layers
+  document.querySelectorAll('.layer-head').forEach(function(h){
+    h.addEventListener('click', function(){ h.parentElement.classList.toggle('open'); });
+  });
+  // open the first layer by default
+  document.querySelector('.layer').classList.add('open');
+  refresh();
+})();
+</script>
+</body>
+</html>
