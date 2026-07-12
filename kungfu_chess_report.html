@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kung-Fu Chess — מפת הארכיטקטורה</title>
+<style>
+  :root{
+    /* --- warm bone paper, lacquer-red, board tones (subject: chess + kung-fu) --- */
+    --paper:#f2ece1; --paper-2:#f8f3ea; --surface:#fffdf8;
+    --ink:#16120c; --ink-2:#403a30; --muted:#6f685b;
+    --line:#e2d8c6; --line-2:#d4c9b4;
+    --accent:#a5271a; --accent-ink:#871d12; --accent-soft:#eacca6;
+    --gold:#bd8c26; --ok:#3d7a51;
+    --sq-d:#2c2820; --sq-l:#e6dcc8;
+    --model:#2f6f7d; --rules:#7a5aa8; --realtime:#a5271a; --engine:#bd8c26; --io:#556070;
+    --mono:"JetBrains Mono","SFMono-Regular",ui-monospace,"Menlo","Consolas",monospace;
+    --serif:"Frank Ruhl Libre","Iowan Old Style","Palatino Linotype","Georgia","Times New Roman",serif;
+    --sans:"Assistant","Rubik","Heebo","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    --r:12px; --r2:8px; --r3:6px;
+    --sh1:0 1px 2px rgba(22,18,12,.04),0 2px 8px rgba(22,18,12,.05);
+    --sh2:0 8px 22px -10px rgba(22,18,12,.24);
+    --sh3:0 26px 54px -24px rgba(22,18,12,.38);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0;color:var(--ink);font-family:var(--sans);line-height:1.72;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    background:
+      radial-gradient(1200px 500px at 82% -10%, rgba(189,140,38,.06), transparent 60%),
+      radial-gradient(900px 480px at 8% 4%, rgba(165,39,26,.05), transparent 55%),
+      var(--paper);
+  }
+  ::selection{background:var(--accent);color:#fff;}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px;}
+  code{font-family:var(--mono);background:#ece3d1;border:1px solid #ddd0b9;padding:.06em .4em;border-radius:5px;font-size:.86em;color:#5a2018;}
+
+  /* ---------- signature: two-square board marker reused on every kicker ---------- */
+  .eyebrow::before,.sec-label::before{
+    content:"";width:22px;height:11px;flex:none;border-radius:2px;border:1px solid var(--ink);
+    background:linear-gradient(90deg,var(--sq-d) 0 50%,var(--sq-l) 50% 100%);
+    box-shadow:inset -1px 0 0 rgba(0,0,0,.15);display:inline-block;
+  }
+
+  /* ---------------------------------- hero ---------------------------------- */
+  header.hero{position:relative;overflow:hidden;border-bottom:3px solid var(--ink);
+    background:
+      radial-gradient(1100px 460px at 84% -18%, rgba(189,140,38,.08), transparent 60%),
+      radial-gradient(820px 420px at 4% 2%, rgba(165,39,26,.05), transparent 55%),
+      linear-gradient(180deg,#f6f0e6,var(--paper));}
+  /* faint chessboard, confined to the bottom and fading upward — texture, not noise */
+  header.hero::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.16;
+    background:repeating-conic-gradient(var(--sq-d) 0% 25%, var(--sq-l) 0% 50%) 50% 100% / 58px 58px;
+    -webkit-mask:linear-gradient(0deg,#000 0%,#000 16%,transparent 52%);
+            mask:linear-gradient(0deg,#000 0%,#000 16%,transparent 52%);}
+  /* a crisp back-rank strip hugging the bottom border = tidy chess signature */
+  header.hero::after{content:"";position:absolute;inset-inline:0;bottom:0;height:10px;
+    background:repeating-linear-gradient(90deg,var(--sq-d) 0 58px,var(--sq-l) 58px 116px);opacity:.9;}
+  .hero-inner{position:relative;z-index:2;padding:74px 24px 46px;max-width:1000px;margin:0 auto;
+    animation:rise .7s cubic-bezier(.2,.7,.2,1) both;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;display:flex;gap:11px;align-items:center;}
+  h1.title{font-family:var(--serif);font-weight:800;font-size:clamp(2.5rem,6.2vw,4.3rem);line-height:1.03;margin:.3em 0 .16em;letter-spacing:-.015em;text-wrap:balance;}
+  h1.title .kf{color:var(--ink-2);position:relative;white-space:nowrap;
+    background:linear-gradient(transparent 78%, rgba(165,39,26,.18) 0);}
+  .subtitle{font-size:1.1rem;max-width:58ch;color:var(--ink-2);}
+  .subtitle b{color:var(--ink);}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:30px;}
+  .stat{position:relative;background:linear-gradient(180deg,#211c15,var(--ink));color:var(--paper);border-radius:var(--r2);
+    padding:14px 20px 12px;box-shadow:var(--sh2);border:1px solid rgba(255,255,255,.06);
+    transition:transform .18s ease,box-shadow .18s ease;}
+  .stat:hover{transform:translateY(-3px);box-shadow:var(--sh3);}
+  .stat b{font-family:var(--serif);font-size:1.7rem;font-weight:800;display:block;line-height:1;color:#fff;}
+  .stat span{font-family:var(--mono);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72;}
+  .stat::after{content:"";position:absolute;inset-inline-start:0;inset-block:10px auto;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--accent);}
+
+  /* -------------------------------- sections -------------------------------- */
+  section{padding:58px 0;position:relative;}
+  section + section::before{content:"";position:absolute;top:0;inset-inline:24px;height:1px;
+    background:repeating-linear-gradient(90deg,var(--line-2) 0 10px,transparent 10px 20px);}
+  .sec-label{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:11px;}
+  h2{font-family:var(--serif);font-weight:800;font-size:clamp(1.7rem,3.6vw,2.4rem);margin:.06em 0 .5em;letter-spacing:-.015em;line-height:1.12;text-wrap:balance;}
+  h3{font-family:var(--serif);font-weight:700;font-size:1.3rem;margin:1.5em 0 .3em;}
+  p{max-width:72ch;}
+  .lead{font-size:1.12rem;color:var(--ink-2);}
+  .lead b{color:var(--ink);}
+
+  /* -------------------------------- glossary -------------------------------- */
+  .glossary{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:6px 8px;margin-top:26px;box-shadow:var(--sh1);}
+  .gitem{border-bottom:1px solid var(--line);} .gitem:last-child{border-bottom:none;}
+  .gq{width:100%;text-align:right;background:none;border:none;cursor:pointer;padding:14px 12px;font-family:var(--sans);font-size:1rem;color:var(--ink);display:flex;align-items:center;gap:10px;border-radius:var(--r3);transition:background .15s;}
+  .gq:hover{background:#f6efe3;}
+  .gq:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+  .gq .term{font-family:var(--mono);font-weight:700;color:var(--accent);}
+  .gq .tw{margin-inline-start:auto;color:var(--accent);font-weight:700;transition:transform .22s;font-size:1.15rem;line-height:1;}
+  .gitem.open .tw{transform:rotate(-90deg);}
+  .ga{display:none;padding:2px 12px 15px;font-size:.95rem;color:var(--ink-2);max-width:none;line-height:1.7;}
+  .gitem.open .ga{display:block;animation:reveal .28s ease both;}
+
+  /* ------------------------------ intuition cards --------------------------- */
+  .intuition{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:16px;margin-top:28px;}
+  .icard{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px 20px 18px;box-shadow:var(--sh1);overflow:hidden;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;}
+  .icard::before{content:"";position:absolute;inset-block-start:0;inset-inline:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--gold));opacity:0;transition:opacity .2s;}
+  .icard:hover{transform:translateY(-4px);box-shadow:var(--sh2);border-color:var(--line-2);}
+  .icard:hover::before{opacity:1;}
+  .icard .k{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;}
+  .icard h4{font-family:var(--serif);font-weight:700;font-size:1.15rem;margin:.4em 0 .35em;}
+  .icard p{font-size:.93rem;margin:0;color:var(--ink-2);line-height:1.62;}
+
+  /* ------------------------------- pipeline --------------------------------- */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;margin:32px 0 10px;font-family:var(--mono);box-shadow:var(--sh1);border-radius:var(--r2);}
+  .pstep{position:relative;flex:1;min-width:132px;background:var(--surface);border:1px solid var(--line-2);padding:14px 12px 12px;text-align:center;transition:box-shadow .18s,border-color .18s,transform .18s,z-index 0s;}
+  .pstep + .pstep{margin-inline-start:-1px;}
+  .pipe > .pstep:first-child{border-start-start-radius:var(--r2);border-end-start-radius:var(--r2);}
+  .pipe > .pstep:last-child{border-start-end-radius:var(--r2);border-end-end-radius:var(--r2);}
+  .pstep::before{content:"";position:absolute;inset-block-start:0;inset-inline:0;height:3px;background:var(--accent);opacity:0;transition:opacity .18s;}
+  .pstep:hover{z-index:3;border-color:var(--accent);box-shadow:var(--sh2);}
+  .pstep:hover::before{opacity:1;}
+  .pstep .n{font-size:.6rem;letter-spacing:.14em;color:var(--accent-ink);font-weight:700;}
+  .pstep .m{font-size:.88rem;font-weight:700;margin-top:3px;color:var(--ink);}
+  .pstep .d{font-size:.66rem;color:var(--muted);font-family:var(--sans);margin-top:4px;}
+  .pipe-note{font-size:.9rem;color:var(--muted);}
+  .pipe-note code{background:#ece3d1;}
+
+  /* -------------------------------- layers ---------------------------------- */
+  .layers{margin-top:28px;display:flex;flex-direction:column;gap:14px;}
+  .layer{border-radius:var(--r);border:1px solid var(--line);overflow:hidden;background:var(--surface);box-shadow:var(--sh1);transition:box-shadow .2s,border-color .2s;}
+  .layer.open{box-shadow:var(--sh2);border-color:var(--line-2);}
+  .layer-head{display:flex;align-items:center;gap:13px;padding:15px 18px;cursor:pointer;user-select:none;transition:background .15s;}
+  .layer-head:hover{background:#f6efe3;}
+  .layer-head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+  .swatch{width:14px;height:14px;border-radius:3px;flex:none;box-shadow:0 0 0 3px rgba(0,0,0,.05);}
+  .layer-head .lname{font-family:var(--mono);font-weight:700;font-size:.98rem;}
+  .layer-head .lfile{font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-inline-start:auto;letter-spacing:.02em;}
+  .layer-head .caret{transition:transform .22s;color:var(--accent);font-weight:700;margin-inline-start:12px;font-size:1.05rem;line-height:1;}
+  .layer.open .caret{transform:rotate(-90deg);}
+  .layer-body{display:none;padding:4px 18px 18px;border-top:1px dashed var(--line-2);}
+  .layer.open .layer-body{display:block;animation:reveal .3s ease both;}
+  .owns{font-size:.92rem;color:var(--ink-2);margin:12px 0 6px;} .owns b{color:var(--ink);}
+
+  /* ------------------------------ function table ---------------------------- */
+  table.fns{width:100%;border-collapse:collapse;margin-top:10px;font-size:.9rem;}
+  table.fns th,table.fns td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+  table.fns th{font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line-2);}
+  td.fn{white-space:nowrap;}
+  .fnrow{transition:background .15s;}
+  .fnrow:hover td{background:#f6efe3;}
+  .fnrow.open td{background:#f3ebdd;}
+  .fnbtn{background:none;border:none;cursor:pointer;font-family:var(--mono);color:var(--accent);font-size:.86rem;padding:2px 4px;margin:-2px -4px;border-radius:5px;display:inline-flex;align-items:center;gap:8px;text-align:right;font-weight:600;}
+  .fnbtn:focus-visible{outline:2px solid var(--accent);outline-offset:0;}
+  .fnbtn .tw{color:var(--gold);font-weight:700;transition:transform .22s;display:inline-block;}
+  .fnrow.open .fnbtn .tw{transform:rotate(-90deg);}
+  .fncode{display:none;}
+  .fncode.show{display:table-row;}
+  .fncode.show pre.code{animation:reveal .28s ease both;}
+  pre.code{margin:4px 0 10px;background:linear-gradient(180deg,#20201b,#191813);color:#ece5d7;border-radius:var(--r2);padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:.79rem;line-height:1.62;direction:ltr;text-align:left;border:1px solid #35322b;box-shadow:inset 0 1px 0 rgba(255,255,255,.05),var(--sh2);white-space:pre;}
+  pre.code::-webkit-scrollbar{height:9px;}
+  pre.code::-webkit-scrollbar-thumb{background:#4a463d;border-radius:9px;}
+  pre.code::-webkit-scrollbar-track{background:transparent;}
+
+  /* -------------------------------- chips ----------------------------------- */
+  .chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px;}
+  .chip{background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:.74rem;padding:8px 13px;border-radius:var(--r3);letter-spacing:.03em;box-shadow:var(--sh1);}
+  .chip b{color:var(--accent-soft);}
+
+  /* ------------------------------- quiz (dark) ------------------------------ */
+  .quiz-hero{position:relative;background:radial-gradient(120% 120% at 85% 0%, #241f18, var(--ink));color:#f2ece1;border-top:3px solid var(--accent);}
+  .quiz-hero::before{content:"";position:absolute;inset:0;opacity:.05;pointer-events:none;
+    background:repeating-conic-gradient(#fff 0% 25%, transparent 0% 50%) 50% / 46px 46px;}
+  .quiz-hero .wrap{position:relative;z-index:1;}
+  .quiz-hero .sec-label{color:var(--accent-soft);}
+  .quiz-hero .sec-label::before{border-color:#fff;}
+  .quiz-hero h2{color:#fff;}
+  .quiz-hero p{color:#ddd5c7;}
+  .q{background:#25211b;border:1px solid #423d36;border-radius:var(--r);padding:20px 22px;margin:16px 0;box-shadow:var(--sh2);}
+  .q .qn{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;color:#e2ac4c;font-weight:700;text-transform:uppercase;}
+  .q h4{font-family:var(--serif);color:#fff;font-size:1.18rem;margin:.35em 0 .75em;font-weight:700;line-height:1.4;}
+  .q h4 code{background:#463c33;color:#ffe6b0;border-color:#574a3e;}
+  .opt{display:block;background:#332f28;border:1px solid #4d483f;color:#f4efe4;padding:12px 15px;border-radius:var(--r3);margin:8px 0;cursor:pointer;font-size:.95rem;transition:background .15s,border-color .15s,transform .1s;}
+  .opt code{background:#463c33;color:#ffe6b0;border-color:#574a3e;}
+  .opt:hover{background:#3d372e;border-color:#63594c;}
+  .opt:active{transform:scale(.995);}
+  .opt:focus-visible{outline:2px solid var(--gold);outline-offset:2px;}
+  .opt.correct{border-color:var(--ok);background:#1f3327;color:#d0ead7;box-shadow:inset 3px 0 0 var(--ok);}
+  .opt.wrong{border-color:var(--accent);background:#33211d;color:#f2cfc6;box-shadow:inset 3px 0 0 var(--accent);}
+  .opt .mark{font-family:var(--mono);font-weight:700;margin-inline-end:11px;color:var(--gold);}
+  .opt.correct .mark{color:#7fd39a;} .opt.wrong .mark{color:#e79b8c;}
+  .explain{display:none;margin-top:11px;font-size:.9rem;color:#ddd3c1;border-inline-start:3px solid var(--gold);padding:10px 14px;background:#2a2620;border-radius:0 var(--r3) var(--r3) 0;line-height:1.6;}
+  .explain code{background:#463c33;color:#ffe6b0;border-color:#574a3e;}
+  .q.answered .explain{display:block;animation:reveal .3s ease both;}
+
+  /* ------------------------------- scorebar --------------------------------- */
+  .scorebar{position:sticky;bottom:0;z-index:20;background:var(--accent);color:#fff;font-family:var(--mono);text-align:center;padding:15px;letter-spacing:.05em;font-size:.95rem;
+    box-shadow:0 -6px 26px rgba(0,0,0,.28);border-top:1px solid rgba(255,255,255,.14);backdrop-filter:saturate(1.1);}
+  .scorebar b{font-size:1.18rem;}
+  .verdict{font-weight:700;}
+  footer{padding:34px 24px 54px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.74rem;letter-spacing:.06em;line-height:1.9;}
+
+  /* ------------------------------ motion + a11y ----------------------------- */
+  @keyframes rise{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:none;}}
+  @keyframes reveal{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
+
+  @media (max-width:560px){
+    .pstep{min-width:calc(50% - 1px);}
+    .layer-head .lfile{display:none;}
+    .hero-inner{padding-top:56px;}
+    .wrap{padding:0 18px;}
+  }
+  @media print{
+    body{background:#fff;}
+    .scorebar{position:static;box-shadow:none;}
+    .layer-body,.ga,.explain{display:block!important;}
+    .fncode{display:table-row!important;}
+    .hero-inner{animation:none;}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{scroll-behavior:auto!important;transition:none!important;animation:none!important;}
+  }
+</style>
+</head>
+<body>
+<header class="hero"><div class="hero-inner">
+  <div class="eyebrow">Kung-Fu Chess · דוח ארכיטקטורה</div>
+  <h1 class="title"><span class="kf">שחמט שלא מחכה לתורך</span></h1>
+  <p class="subtitle">מנוע משחק בזמן-אמת שבו כלים נעים במקביל, לוקח לתנועה זמן, ומלך אחד מפיל את המשחק. בנוי סביב עיקרון אחד: <b>חוקים הם דאטה, לא קוד.</b></p>
+  <div class="stat-row">
+    <div class="stat"><b>8</b><span>מודולי מקור</span></div>
+    <div class="stat"><b>116</b><span>טסטים עוברים</span></div>
+    <div class="stat"><b>100%</b><span>כיסוי קוד</span></div>
+    <div class="stat"><b>5</b><span>שכבות אחריות</span></div>
+  </div>
+</div></header>
+
+<section id="glossary"><div class="wrap">
+  <div class="sec-label">מילון · מונחים לפני שמתחילים</div>
+  <h2>שש מילים שכדאי להכיר</h2>
+  <p>הדוח משתמש בכמה מונחים טכניים. לחצי על כל אחד כדי לפתוח הסבר קצר.</p>
+  <div class="glossary">
+    <div class="gitem"><button class="gq"><span class="term">מרחק צ'בישב</span> — כמה "צעדים" מהלך אורך<span class="tw">‹</span></button><div class="ga">מספר הצעדים על הלוח כשצעד אלכסוני נחשב <b>צעד אחד</b>, בדיוק כמו ישר. מ-(0,0) ל-(2,2) זה 2 צעדים (לא שורש 8). לכן במשחק אלכסון עולה אותו זמן כמו ישר — 1000ms לצעד.</div></div>
+    <div class="gitem"><button class="gq"><span class="term">מתזמר</span> (orchestrate)<span class="tw">‹</span></button><div class="ga">מתאם בין רכיבים בלי לעשות את העבודה בעצמו. פונקציה "מתזמרת" קוראת לעוזרים בסדר הנכון ומחזירה תוצאה — אבל הלוגיקה עצמה יושבת בעוזרים. למשל <code>advance_time</code> מתזמרת: קוראת ל-<code>_resolve_motion</code> ול-<code>_resolve_jump_timeout</code>.</div></div>
+    <div class="gitem"><button class="gq"><span class="term">FSM</span> — מכונת-מצבים<span class="tw">‹</span></button><div class="ga">Finite State Machine. המצב הנוכחי קובע מה יקרה בפעולה הבאה. כאן: אם אין כלי-נבחר, לחיצה <b>בוחרת</b>; אם יש נבחר, הלחיצה הבאה <b>מזיזה</b>. אותה לחיצה, התנהגות שונה — תלוי במצב.</div></div>
+    <div class="gitem"><button class="gq"><span class="term">rays</span> — קרני-תנועה<span class="tw">‹</span></button><div class="ga">כל שורה בטבלת-התנועה של כלי. כל ray הוא tuple שמתאר מהלך אחד אפשרי: כיוון (dr,dc), כמה צעדים, האם קופץ, לאיזה יעד מותר, ומאיזו שורה. אוסף ה-rays של כלי = כל הדרכים שהוא יכול לזוז.</div></div>
+    <div class="gitem"><button class="gq"><span class="term">namedtuple</span><span class="tw">‹</span></button><div class="ga">אובייקט-דאטה זעיר של פייתון עם שדות בשם, בלי התנהגות. <code>Motion</code> ו-<code>Jump</code> הם כאלה — הם רק מחזיקים ערכים (מי, מאיפה, מתי), ואף אחד לא "עושה" בהם דבר חוץ מלקרוא.</div></div>
+    <div class="gitem"><button class="gq"><span class="term">target / gated</span> — שני שדות ב-ray<span class="tw">‹</span></button><div class="ga"><b>target</b> אומר לאיזה יעד ה-ray תקף: <code>"any"</code> (ריק או אויב), <code>"empty"</code> (רק ריק), <code>"enemy"</code> (רק אויב). <b>gated</b> בוליאני: <code>False</code> = תמיד זמין; <code>True</code> = רק כשהכלי בשורת-הפתיחה שלו (צעד-כפול של חייל).</div></div>
+  </div>
+</div></section>
+
+<section id="context"><div class="wrap">
+  <div class="sec-label">הקשר · מה זה בכלל</div>
+  <h2>מה בנינו, ולמה זה לא שחמט רגיל</h2>
+  <p class="lead">Kung-Fu Chess הוא שחמט <b>בזמן-אמת</b>: אין תורות. שחקן בוחר כלי ולוחץ על יעד, והכלי <b>נע לאורך זמן</b> אל היעד במהירות קבועה (משבצת = 1000ms). הלוח הלוגי משתנה <b>רק כשכלי מגיע</b>, לא ברגע הלחיצה. מלך שנאכל מסיים את המשחק. וכלי יכול "לקפוץ" במקום כדי לאכול אויב שמנסה לנחות עליו.</p>
+  <p>אבל הפרויקט האמיתי הוא לא המשחק — הוא <b>בנייה מקצועית של תוכנה</b>: לפרק רעיון מעורפל לצעדים קטנים ובדיקים, להפריד שכבות, לכתוב טסטים לפני קוד, ולהשאיר את הקוד פתוח להרחבה. כל החלטה נבחנה מול שאלה אחת: אם משתמש ירצה להמציא משחק משלו — "שחמט של שלומי" — האם הוא צריך לכתוב קוד, או רק לשנות דאטה? התשובה תמיד: <b>רק דאטה.</b></p>
+  <div class="intuition">
+    <div class="icard"><div class="k">האינטואיציה</div><h4>הלוח הוא רק "מה קיים"</h4><p>הלוח לא יודע חוקי שחמט, לא פיקסלים, ולא זמן. הוא רק מחזיק איזה כלי בכל תא. כל השאר שואל אותו.</p></div>
+    <div class="icard"><div class="k">האינטואיציה</div><h4>תנועה לוקחת זמן</h4><p>מהלך לא קורה מיד. הוא "נשלח", וגורם-הזמן מיישב אותו כשמגיע רגע-ההגעה. עד אז הלוח לא זז.</p></div>
+    <div class="icard"><div class="k">האינטואיציה</div><h4>חוקים = טבלת דאטה</h4><p>איך כל כלי זז יושב כטבלת מספרים ב-Config. המנוע מפרש טבלה — לא מכיר "צריח" או "חייל" בשם.</p></div>
+    <div class="icard"><div class="k">האינטואיציה</div><h4>כל שכבה עובדת אחת</h4><p>מי בודק חוקיות אינו מי שמזיז אינו מי שסופר זמן אינו מי שמנהל בחירה. אחריות אחת לכל מחלקה.</p></div>
+  </div>
+</div></section>
+
+<section id="flow"><div class="wrap">
+  <div class="sec-label">התהליך · איך פקודה זורמת</div>
+  <h2>המסע של פקודה אחת</h2>
+  <p>כשה-VPL שולח <code>click 150 50</code> או <code>jump 50 50</code>, הפקודה עוברת בין השכבות — כל אחת עושה את החלק שלה ומעבירה הלאה. אף שכבה לא עוקפת את זו שמעליה.</p>
+  <div class="pipe">
+    <div class="pstep"><div class="n">01</div><div class="m">main.dispatch</div><div class="d">מפענח את הפקודה</div></div>
+    <div class="pstep"><div class="n">02</div><div class="m">Game</div><div class="d">בחירה + guards</div></div>
+    <div class="pstep"><div class="n">03</div><div class="m">MoveValidator</div><div class="d">חוקי?</div></div>
+    <div class="pstep"><div class="n">04</div><div class="m">RealTimeArbiter</div><div class="d">מתחיל תנועה</div></div>
+    <div class="pstep"><div class="n">05</div><div class="m">Board</div><div class="d">משתנה בהגעה</div></div>
+  </div>
+  <p class="pipe-note">ה-<code>wait ms</code> מקדם את השעון בתוך RealTimeArbiter — וזה מה שגורם למהלכים "להגיע" ולקפיצות "לפוג". הלוח משתנה רק כאן, ברגע ההגעה.</p>
+</div></section>
+
+<section id="layers"><div class="wrap">
+  <div class="sec-label">המבנה · חמש שכבות, שמונה קבצים</div>
+  <h2>מפת הקבצים — לחצי על שכבה, ואז על כל פונקציה</h2>
+  <p>הפרויקט מסודר לפי אחריות: כל תיקייה = שכבה, כל קובץ = מחלקה אחת. בכל טבלה, לחיצה על <b>שם פונקציה</b> פותחת חץ ומראה את הקוד המדויק שלה (סגור כברירת-מחדל).</p>
+  <div class="layers">
+<div class="layer">
+  <div class="layer-head"><span class="swatch" style="background:var(--model)"></span>
+    <span class="lname">model/ — נתונים טהורים</span>
+    <span class="lfile">config · board · motion · jump</span>
+    <span class="caret">‹</span></div>
+  <div class="layer-body">
+    <p class="owns"><b>אחראית על:</b> מה קיים בעולם — גודל תא, אלפבית-כלים, מיקומים, וחוקי-תנועה כדאטה. לא יודעת פיקסלים, חוקיות, זמן, או ציור.</p>
+    <h3>config.py — Config</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">מקור-האמת היחיד לכל דבר שאפשר לכוונן. &quot;שחמט של שלומי&quot; חי כאן.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="model0_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>__init__</button></td>
+  <td>מקבלת את כל הפרמטרים המכווננים — גודל תא, צבעים, מהירות, זמן-קפיצה, וקטורי-כיוון — כולם עם ברירת-מחדל וניתנים לדריסה.</td>
+</tr>
+<tr class="fncode" id="code_model0_0"><td colspan="2"><pre class="code">def __init__(self, cell_size=100, colors=(&quot;w&quot;,&quot;b&quot;),
+             piece_types=(&quot;K&quot;,&quot;Q&quot;,&quot;R&quot;,&quot;B&quot;,&quot;N&quot;,&quot;P&quot;), empty=&quot;.&quot;,
+             movement=None, piece_speed_ms=1000, king_type=&quot;K&quot;,
+             promotions=None, jump_ms=1000,
+             orthogonal_deltas=_ORTHOGONAL, diagonal_deltas=_DIAGONAL,
+             knight_deltas=_KNIGHT_DELTAS):
+    self.cell_size = cell_size
+    self.colors = colors
+    self.piece_types = piece_types
+    self.empty = empty
+    self.movement = (_default_movement(orthogonal_deltas, diagonal_deltas,
+                     knight_deltas) if movement is None else movement)
+    self.piece_speed_ms = piece_speed_ms
+    self.king_type = king_type
+    self.promotions = {&quot;wP&quot;:&quot;wQ&quot;,&quot;bP&quot;:&quot;bQ&quot;} if promotions is None else promotions
+    self.jump_ms = jump_ms</pre></td></tr>
+<tr class="fnrow" data-fid="model0_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>is_valid_token</button></td>
+  <td>בודקת שמחרוזת-תא חוקית: או ריק, או צבע+סוג תקינים.</td>
+</tr>
+<tr class="fncode" id="code_model0_1"><td colspan="2"><pre class="code">def is_valid_token(self, token):
+    if token == self.empty:
+        return True
+    return (len(token) == 2
+            and token[0] in self.colors
+            and token[1] in self.piece_types)</pre></td></tr>
+<tr class="fnrow" data-fid="model0_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>same_color</button></td>
+  <td>האם שני כלים מאותו צבע (לפי התו הראשון).</td>
+</tr>
+<tr class="fncode" id="code_model0_2"><td colspan="2"><pre class="code">def same_color(self, token_a, token_b):
+    return token_a[0] == token_b[0]</pre></td></tr>
+<tr class="fnrow" data-fid="model0_3">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>travel_time</button></td>
+  <td>כמה ms לוקח מהלך: מרחק-צ&#x27;בישב כפול מהירות. אלכסון = כמו ישר.</td>
+</tr>
+<tr class="fncode" id="code_model0_3"><td colspan="2"><pre class="code">def travel_time(self, src, dst):
+    # Chebyshev distance: a diagonal step costs the same as orthogonal
+    steps = max(abs(dst[0]-src[0]), abs(dst[1]-src[1]))
+    return steps * self.piece_speed_ms</pre></td></tr>
+<tr class="fnrow" data-fid="model0_4">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>start_row</button></td>
+  <td>שורת-הפתיחה של צבע לצעד-כפול (נגזרת מגובה הלוח).</td>
+</tr>
+<tr class="fncode" id="code_model0_4"><td colspan="2"><pre class="code">def start_row(self, color, board):
+    # Pawn double-step origin -- the second rank, one square in from
+    # the edge that color enters from.
+    return board.rows - 2 if self._is_first_color(color) else 1</pre></td></tr>
+<tr class="fnrow" data-fid="model0_5">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>promotion_row</button></td>
+  <td>שורת-הקידום — הקצה הרחוק. מושג נפרד מ-start_row.</td>
+</tr>
+<tr class="fncode" id="code_model0_5"><td colspan="2"><pre class="code">def promotion_row(self, color, board):
+    # The far edge color&#x27;s pawns walk toward -- always the extreme row.
+    return 0 if self._is_first_color(color) else board.rows - 1</pre></td></tr>
+<tr class="fnrow" data-fid="model0_6">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>promotion_target</button></td>
+  <td>לאיזה כלי חייל מתקדם בהגעה לשורת-הקידום (חייל→מלכה), או None. מיפוי בדאטה.</td>
+</tr>
+<tr class="fncode" id="code_model0_6"><td colspan="2"><pre class="code">def promotion_target(self, piece, arrival_row, board):
+    promoted = self.promotions.get(piece)
+    if promoted is None:
+        return None
+    return promoted if arrival_row == self.promotion_row(piece[0], board) else None</pre></td></tr>
+<tr class="fnrow" data-fid="model0_7">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_is_first_color</button></td>
+  <td>עוזר פרטי: האם זה הצבע הראשון. מרכז את הנחת-שני-הצבעים במקום אחד מוצהר.</td>
+</tr>
+<tr class="fncode" id="code_model0_7"><td colspan="2"><pre class="code">def _is_first_color(self, color):
+    # ASSUMES exactly two configured colors -- the only case this project
+    # needs. A 3+ color variant would need a different rule here.
+    return color == self.colors[0]</pre></td></tr>
+<tr class="fnrow" data-fid="model0_8">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_default_movement / _pawn_rules</button></td>
+  <td>בונות את טבלת חוקי-התנועה כ-rays. הלב של &quot;חוקים=דאטה&quot;.</td>
+</tr>
+<tr class="fncode" id="code_model0_8"><td colspan="2"><pre class="code"># Ray tuple: (dr, dc, max_steps, can_jump, target, gated)
+def _pawn_rules(direction):
+    return [
+        (direction, 0, 1, False, &quot;empty&quot;, False),  # forward one, always
+        (direction, 0, 2, False, &quot;empty&quot;, True),   # forward two, only from start row
+        (direction, -1, 1, False, &quot;enemy&quot;, False), # capture diagonally
+        (direction, 1, 1, False, &quot;enemy&quot;, False),
+    ]
+
+def _default_movement(orthogonal, diagonal, knight_deltas):
+    all_directions = orthogonal + diagonal
+    return {
+        &quot;K&quot;: [(dr,dc,1,False,&quot;any&quot;,False) for dr,dc in all_directions],
+        &quot;Q&quot;: [(dr,dc,None,False,&quot;any&quot;,False) for dr,dc in all_directions],
+        &quot;R&quot;: [(dr,dc,None,False,&quot;any&quot;,False) for dr,dc in orthogonal],
+        &quot;B&quot;: [(dr,dc,None,False,&quot;any&quot;,False) for dr,dc in diagonal],
+        &quot;N&quot;: [(dr,dc,1,True,&quot;any&quot;,False) for dr,dc in knight_deltas],
+        &quot;wP&quot;: _pawn_rules(-1),
+        &quot;bP&quot;: _pawn_rules(1),
+    }</pre></td></tr>
+</table>
+<h3>board.py — Board</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">מחזיק את התפוסה הלוגית. אף אחד לא יודע איך הוא מאחסן — רק שואל.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="model1_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>rows / cols</button></td>
+  <td>מימדי הלוח, נגזרים מהמבנה הפנימי.</td>
+</tr>
+<tr class="fncode" id="code_model1_0"><td colspan="2"><pre class="code">@property
+def rows(self):
+    return len(self._grid)
+
+@property
+def cols(self):
+    return len(self._grid[0]) if self._grid else 0</pre></td></tr>
+<tr class="fnrow" data-fid="model1_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>in_bounds</button></td>
+  <td>האם (שורה,עמודה) בתוך הלוח.</td>
+</tr>
+<tr class="fncode" id="code_model1_1"><td colspan="2"><pre class="code">def in_bounds(self, row, col):
+    return 0 &lt;= row &lt; self.rows and 0 &lt;= col &lt; self.cols</pre></td></tr>
+<tr class="fnrow" data-fid="model1_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>piece_at</button></td>
+  <td>מה הכלי בתא — או None אם ריק.</td>
+</tr>
+<tr class="fncode" id="code_model1_2"><td colspan="2"><pre class="code">def piece_at(self, row, col):
+    token = self._grid[row][col]
+    return None if token == self._config.empty else token</pre></td></tr>
+<tr class="fnrow" data-fid="model1_3">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>move</button></td>
+  <td>מזיז כלי ממקור ליעד (מניח שכבר אומת). מרוקן את המקור.</td>
+</tr>
+<tr class="fncode" id="code_model1_3"><td colspan="2"><pre class="code">def move(self, src, dst):
+    (r1, c1), (r2, c2) = src, dst
+    self._grid[r2][c2] = self._grid[r1][c1]
+    self._grid[r1][c1] = self._config.empty</pre></td></tr>
+<tr class="fnrow" data-fid="model1_4">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>set_piece</button></td>
+  <td>מציב token בתא — לקידום (חייל→מלכה) ולהסרה.</td>
+</tr>
+<tr class="fncode" id="code_model1_4"><td colspan="2"><pre class="code">def set_piece(self, cell, token):
+    row, col = cell
+    self._grid[row][col] = token</pre></td></tr>
+<tr class="fnrow" data-fid="model1_5">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>render</button></td>
+  <td>מחזיר את הלוח כטקסט, לפורמט print board.</td>
+</tr>
+<tr class="fncode" id="code_model1_5"><td colspan="2"><pre class="code">def render(self):
+    return &quot;\n&quot;.join(&quot; &quot;.join(row) for row in self._grid)</pre></td></tr>
+</table>
+<h3>motion.py / jump.py — Motion, Jump</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">שני value objects זעירים (namedtuple), דאטה טהורה. אין בהם לוגיקה — RealTimeArbiter מחליט מתי הם מתיישבים, והלוח לא רואה אותם כלל.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="model2_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>Motion</button></td>
+  <td>מהלך בתנועה. דוגמה: Motion(&quot;wR&quot;,(0,0),(0,3),3000) = צריח נע ל-(0,3), יגיע ב-3000ms.</td>
+</tr>
+<tr class="fncode" id="code_model2_0"><td colspan="2"><pre class="code">from collections import namedtuple
+
+# A validated move in flight. Pure data: no timing math, no board access.
+# RealTimeArbiter owns when it resolves; Board never sees it.
+Motion = namedtuple(&quot;Motion&quot;, [&quot;piece&quot;, &quot;source&quot;, &quot;destination&quot;, &quot;arrival_time&quot;])</pre></td></tr>
+<tr class="fnrow" data-fid="model2_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>Jump</button></td>
+  <td>כלי באוויר. דוגמה: Jump(&quot;wK&quot;,(1,0),1000) = מלך קופץ ב-(1,0), נוחת ב-1000ms.</td>
+</tr>
+<tr class="fncode" id="code_model2_1"><td colspan="2"><pre class="code">from collections import namedtuple
+
+# A piece currently airborne. Pure data: no timing math, no board access.
+Jump = namedtuple(&quot;Jump&quot;, [&quot;piece&quot;, &quot;cell&quot;, &quot;end_time&quot;])</pre></td></tr>
+</table>
+  </div>
+</div>
+<div class="layer">
+  <div class="layer-head"><span class="swatch" style="background:var(--rules)"></span>
+    <span class="lname">rules/ — חוקיות (קריאה בלבד)</span>
+    <span class="lfile">rules</span>
+    <span class="caret">‹</span></div>
+  <div class="layer-body">
+    <p class="owns"><b>אחראית על:</b> שאלה אחת: האם המהלך חוקי עכשיו? לא מזיזה כלים, לא סופרת זמן, לא משנה לוח.</p>
+    <h3>rules.py — MoveValidator</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">שאלה אחת: &quot;האם המהלך מ-src ל-dst חוקי עכשיו?&quot;. לא מזיזה כלים, לא סופרת זמן, לא משנה לוח.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="rules0_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>is_legal</button></td>
+  <td>הלב: קורא את חוקי-התנועה מ-Config (כדאטה), חוסם נחיתה על ידידותי, ובודק אם היעד נגיש דרך אחת ה-rays. אין בו שום if על סוג-כלי.</td>
+</tr>
+<tr class="fncode" id="code_rules0_0"><td colspan="2"><pre class="code">def is_legal(self, src, dst):
+    piece = self._board.piece_at(*src)
+    dst_piece = self._board.piece_at(*dst)
+    if dst_piece is not None and self._config.same_color(piece, dst_piece):
+        return False
+    rays = self._config.movement.get(piece, self._config.movement.get(piece[1]))
+    if rays is None:
+        return True  # unrestricted: no rule defined for this piece type
+    wanted = (dst[0]-src[0], dst[1]-src[1])
+    for dr, dc, max_steps, can_jump, target, gated in rays:
+        if not self._target_ok(target, dst_piece):
+            continue
+        if gated and src[0] != self._config.start_row(piece[0], self._board):
+            continue
+        if can_jump:
+            if wanted == (dr, dc):
+                return True
+        elif self._slides_to(src, dst, dr, dc, max_steps):
+            return True
+    return False</pre></td></tr>
+<tr class="fnrow" data-fid="rules0_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_target_ok</button></td>
+  <td>האם היעד מתאים לסוג ה-ray: any / empty (רק ריק) / enemy (רק אויב). מפריד תנועת-חייל מאכילת-חייל.</td>
+</tr>
+<tr class="fncode" id="code_rules0_1"><td colspan="2"><pre class="code">def _target_ok(self, target, dst_piece):
+    if target == &quot;any&quot;:
+        return True
+    if target == &quot;empty&quot;:
+        return dst_piece is None
+    return dst_piece is not None  # target == &quot;enemy&quot;</pre></td></tr>
+<tr class="fnrow" data-fid="rules0_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_slides_to</button></td>
+  <td>מחליק לאורך קרן עד היעד, ועוצר על חסימה. משרת צריח, רץ, וצעד-כפול של חייל — בלי כפילות.</td>
+</tr>
+<tr class="fncode" id="code_rules0_2"><td colspan="2"><pre class="code">def _slides_to(self, src, dst, dr, dc, max_steps):
+    step = 1
+    while max_steps is None or step &lt;= max_steps:
+        r, c = src[0] + step*dr, src[1] + step*dc
+        if not self._board.in_bounds(r, c):
+            return False
+        if (r, c) == dst:
+            return True
+        if self._board.piece_at(r, c) is not None:
+            return False
+        step += 1
+    return False</pre></td></tr>
+</table>
+  </div>
+</div>
+<div class="layer">
+  <div class="layer-head"><span class="swatch" style="background:var(--realtime)"></span>
+    <span class="lname">realtime/ — זמן, תנועה, קפיצה</span>
+    <span class="lfile">arbiter</span>
+    <span class="caret">‹</span></div>
+  <div class="layer-body">
+    <p class="owns"><b>אחראית על:</b> הזמן המדומה, המהלכים, הקפיצות, ויישוב-ההגעות. כאן הלוח באמת משתנה. רק מדווח שנאכל מלך.</p>
+    <h3>arbiter.py — RealTimeArbiter</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">הזמן המדומה, המהלכים-בתנועה, הקפיצות, ויישוב-ההגעות. כאן הלוח באמת משתנה. רק מדווח שנאכל מלך — לא מחזיק game_over.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="realtime0_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>start_motion</button></td>
+  <td>רושם מהלך חדש עם זמן-הגעה מחושב. הלוח עדיין לא זז.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_0"><td colspan="2"><pre class="code">def start_motion(self, piece, source, destination):
+    arrival_time = self._clock + self._config.travel_time(source, destination)
+    self._active_motion = Motion(piece, source, destination, arrival_time)</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>start_jump</button></td>
+  <td>מכניס כלי למצב airborne עד clock+jump_ms.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_1"><td colspan="2"><pre class="code">def start_jump(self, piece, cell):
+    self._airborne = Jump(piece, cell, self._clock + self._config.jump_ms)</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>advance_time</button></td>
+  <td>מקדם את השעון, ואז מתזמר: מיישב מהלך (אם הגיע) ומנקה קפיצה שפגה.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_2"><td colspan="2"><pre class="code">def advance_time(self, ms):        # the orchestrator
+    self._clock += ms
+    self._king_captured = False
+    arrivals = self._resolve_motion()
+    self._resolve_jump_timeout()
+    return arrivals</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_3">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_resolve_motion</button></td>
+  <td>אם מהלך הגיע: בודק reversal קודם; אחרת מבצע אכילה/מלך/קידום ומזיז בלוח.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_3"><td colspan="2"><pre class="code">def _resolve_motion(self):
+    motion = self._active_motion
+    if motion is None or self._clock &lt; motion.arrival_time:
+        return []
+    if self._reverse_if_airborne_enemy(motion):   # reversal FIRST
+        self._active_motion = None
+        return [motion]                            # early return: never lands
+    occupant = self._board.piece_at(*motion.destination)
+    self._king_captured = occupant is not None and self._is_king(occupant)
+    self._board.move(motion.source, motion.destination)
+    promoted = self._config.promotion_target(
+        motion.piece, motion.destination[0], self._board)
+    if promoted is not None:
+        self._board.set_piece(motion.destination, promoted)
+    self._active_motion = None
+    return [motion]</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_4">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_reverse_if_airborne_enemy</button></td>
+  <td>חוק-הקפיצה: אם אויב נוחת על תא של כלי-קופץ בתוך החלון — הקופץ אוכל אותו, המגיע נעלם, הלוח לא זז.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_4"><td colspan="2"><pre class="code">def _reverse_if_airborne_enemy(self, motion):
+    airborne = self._airborne
+    if (airborne is not None
+            and motion.destination == airborne.cell
+            and motion.arrival_time &lt;= airborne.end_time      # inclusive window
+            and not self._config.same_color(motion.piece, airborne.piece)):  # enemy only
+        self._king_captured = self._is_king(motion.piece)
+        self._board.set_piece(motion.source, self._config.empty)  # arriver vanishes
+        self._airborne = None  # jump resolved via capture; piece lands
+        return True
+    return False</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_5">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_resolve_jump_timeout</button></td>
+  <td>אם החלון נגמר בלי אויב — הכלי נוחת (יוצא מ-airborne).</td>
+</tr>
+<tr class="fncode" id="code_realtime0_5"><td colspan="2"><pre class="code">def _resolve_jump_timeout(self):
+    if self._airborne is not None and self._clock &gt;= self._airborne.end_time:
+        self._airborne = None</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_6">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_is_king</button></td>
+  <td>עוזר: האם הכלי הוא מלך (לפי Config.king_type). משמש בשתי דרכי-האכילה.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_6"><td colspan="2"><pre class="code">def _is_king(self, piece):
+    return piece[1] == self._config.king_type</pre></td></tr>
+<tr class="fnrow" data-fid="realtime0_7">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>שאילתות (is_moving / is_airborne / king_was_captured / has_active_motion)</button></td>
+  <td>קריאה-בלבד ש-Game נשען עליהן ל-guards.</td>
+</tr>
+<tr class="fncode" id="code_realtime0_7"><td colspan="2"><pre class="code">def has_active_motion(self):
+    return self._active_motion is not None
+
+def is_moving(self, cell):
+    return self._active_motion is not None and self._active_motion.source == cell
+
+def has_airborne_piece(self):
+    return self._airborne is not None
+
+def is_airborne(self, cell):
+    return self._airborne is not None and self._airborne.cell == cell
+
+def king_was_captured(self):
+    return self._king_captured</pre></td></tr>
+</table>
+  </div>
+</div>
+<div class="layer">
+  <div class="layer-head"><span class="swatch" style="background:var(--engine)"></span>
+    <span class="lname">engine/ — תזמור ובחירה</span>
+    <span class="lfile">game</span>
+    <span class="caret">‹</span></div>
+  <div class="layer-body">
+    <p class="owns"><b>אחראית על:</b> מכונת-המצבים של הבחירה, ו-guards ברמת-אפליקציה (game-over, motion, airborne). מאצילה את השאר.</p>
+    <h3>game.py — Game</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">מכונת-המצבים של הבחירה (FSM), ו-guards ברמת-אפליקציה. מאצילה אחסון/גאומטריה/זמן למי שאחראי.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="engine0_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>click</button></td>
+  <td>ה-FSM: אין בחירה + כלי → בוחר; יש בחירה + ידידותי → מחליף; אחרת → שולח מהלך ומאפס.</td>
+</tr>
+<tr class="fncode" id="code_engine0_0"><td colspan="2"><pre class="code">def click(self, x, y):
+    row, col = self._pixel_to_cell(x, y)
+    if not self._board.in_bounds(row, col):
+        return  # outside the board -&gt; ignored
+    target = self._board.piece_at(row, col)
+    if self._selection is None:
+        if target is not None:
+            self._selection = (row, col)  # select
+        return  # empty cell with no selection -&gt; ignored
+    selected = self._board.piece_at(*self._selection)
+    if target is not None and self._config.same_color(target, selected):
+        self._selection = (row, col)  # replace selection
+        return
+    self._request_move(self._selection, (row, col))
+    self._selection = None</pre></td></tr>
+<tr class="fnrow" data-fid="engine0_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_request_move</button></td>
+  <td>שער הכניסה למהלך: game_over → motion_in_progress → airborne → חוקיות, ורק אז מתחיל תנועה.</td>
+</tr>
+<tr class="fncode" id="code_engine0_1"><td colspan="2"><pre class="code">def _request_move(self, src, dst):
+    if self._game_over:
+        return self.REASON_GAME_OVER
+    if self._rta.has_active_motion():
+        return self.REASON_MOTION_IN_PROGRESS
+    if self._rta.is_airborne(src):
+        return self.REASON_AIRBORNE  # protects rule 2: a jumping piece does not move
+    if not self._validator.is_legal(src, dst):
+        return None  # illegal moves are silently ignored
+    piece = self._board.piece_at(*src)
+    self._rta.start_motion(piece, src, dst)
+    return None</pre></td></tr>
+<tr class="fnrow" data-fid="engine0_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>jump</button></td>
+  <td>מפעיל קפיצה, אוכף את 6 חוקי-הקפיצה (בתנועה לא קופץ, תא-ריק לא קופץ, אחד בכל רגע).</td>
+</tr>
+<tr class="fncode" id="code_engine0_2"><td colspan="2"><pre class="code">def jump(self, x, y):
+    &quot;&quot;&quot;The six jump rules: 1. lasts Config.jump_ms. 2. jumper stays put.
+    3. enemy arriving in window is captured (reversal). 4. else lands.
+    5. a moving piece cannot jump. 6. an empty cell cannot jump.&quot;&quot;&quot;
+    cell = self._pixel_to_cell(x, y)
+    if not self._board.in_bounds(*cell):
+        return
+    if self._game_over:
+        return
+    piece = self._board.piece_at(*cell)
+    if piece is None:
+        return  # rule 6: nothing there to jump
+    if self._rta.is_moving(cell):
+        return  # rule 5: a moving piece cannot jump
+    if self._rta.has_airborne_piece():
+        return  # one active jump at a time
+    self._rta.start_jump(piece, cell)</pre></td></tr>
+<tr class="fnrow" data-fid="engine0_3">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>wait</button></td>
+  <td>מאציל את קידום-הזמן ל-RealTimeArbiter, ואם נאכל מלך — מדליק game_over.</td>
+</tr>
+<tr class="fncode" id="code_engine0_3"><td colspan="2"><pre class="code">def wait(self, ms):
+    self._rta.advance_time(ms)
+    if self._rta.king_was_captured():
+        self._game_over = True</pre></td></tr>
+<tr class="fnrow" data-fid="engine0_4">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>_pixel_to_cell</button></td>
+  <td>ממיר פיקסל→(שורה,עמודה) דרך גודל-התא מ-Config.</td>
+</tr>
+<tr class="fncode" id="code_engine0_4"><td colspan="2"><pre class="code">def _pixel_to_cell(self, x, y):
+    return y // self._config.cell_size, x // self._config.cell_size</pre></td></tr>
+</table>
+  </div>
+</div>
+<div class="layer">
+  <div class="layer-head"><span class="swatch" style="background:var(--io)"></span>
+    <span class="lname">main.py — קלט/פלט ותזמור-על</span>
+    <span class="lfile">שורש · נקודת-כניסה</span>
+    <span class="caret">‹</span></div>
+  <div class="layer-body">
+    <p class="owns"><b>אחראית על:</b> קריאת קלט, פענוח פקודות, ובניית המשחק. דק בכוונה — כל הלוגיקה מואצלת.</p>
+    <h3>main.py</h3>
+<p style="font-size:.9rem;margin:.2em 0 .4em;color:#4a453d">קריאת הקלט, פענוח פקודות, ובניית המשחק. דק בכוונה. הזרקת-תלות: run(inp,out) מקבל זרמים, כדי שהטסטים יזריקו StringIO בלי monkeypatch.</p>
+<table class="fns"><tr><th>פונקציה — לחצי לפתיחת הקוד</th><th>תפקיד בקצרה</th></tr>
+<tr class="fnrow" data-fid="io0_0">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>parse_sections</button></td>
+  <td>מפצל את הקלט לחלק-לוח וחלק-פקודות (מנקה רווחים).</td>
+</tr>
+<tr class="fncode" id="code_io0_0"><td colspan="2"><pre class="code">def parse_sections(lines):
+    lines = [line.strip() for line in lines]
+    board_start = lines.index(&quot;Board:&quot;) + 1
+    commands_start = lines.index(&quot;Commands:&quot;)
+    grid = [line.split() for line in lines[board_start:commands_start] if line]
+    commands = [line for line in lines[commands_start + 1:] if line]
+    return grid, commands</pre></td></tr>
+<tr class="fnrow" data-fid="io0_1">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>validate_board</button></td>
+  <td>בודק רוחב-שורות אחיד ותקינות tokens; מחזיר מחרוזת-שגיאה או None.</td>
+</tr>
+<tr class="fncode" id="code_io0_1"><td colspan="2"><pre class="code">def validate_board(grid, config):
+    widths = {len(row) for row in grid}
+    if len(widths) &gt; 1:
+        return ERROR_ROW_WIDTH
+    for row in grid:
+        for token in row:
+            if not config.is_valid_token(token):
+                return ERROR_UNKNOWN_TOKEN
+    return None</pre></td></tr>
+<tr class="fnrow" data-fid="io0_2">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>dispatch</button></td>
+  <td>מפעיל את הפקודה הנכונה: print / click / wait / jump (אחר → מתעלם).</td>
+</tr>
+<tr class="fncode" id="code_io0_2"><td colspan="2"><pre class="code">def dispatch(game, command, out):
+    parts = command.split()
+    if command == &quot;print board&quot;:
+        print(game.render(), file=out)
+    elif parts[0] == &quot;click&quot; and len(parts) == 3:
+        game.click(int(parts[1]), int(parts[2]))
+    elif parts[0] == &quot;wait&quot; and len(parts) == 2:
+        game.wait(int(parts[1]))
+    elif parts[0] == &quot;jump&quot; and len(parts) == 3:
+        game.jump(int(parts[1]), int(parts[2]))
+    # anything else -&gt; ignored</pre></td></tr>
+<tr class="fnrow" data-fid="io0_3">
+  <td class="fn"><button class="fnbtn"><span class="tw">‹</span>run</button></td>
+  <td>המנצח: קורא, מפרסר, מוודא, בונה Game, ומריץ את כל הפקודות.</td>
+</tr>
+<tr class="fncode" id="code_io0_3"><td colspan="2"><pre class="code">def run(inp, out):
+    lines = inp.read().splitlines()
+    grid, commands = parse_sections(lines)
+    config = Config()
+    error = validate_board(grid, config)
+    if error:
+        print(error, file=out)
+        return
+    game = Game(Board(grid, config), config)
+    for command in commands:
+        dispatch(game, command, out)</pre></td></tr>
+</table>
+  </div>
+</div>  </div>
+  <div class="chips">
+    <div class="chip"><b>DRY</b> · כל לוגיקה במקום אחד</div>
+    <div class="chip"><b>SRP</b> · מחלקה = אחריות אחת</div>
+    <div class="chip"><b>Encapsulation</b> · אף אחד לא נוגע בפנימיות</div>
+    <div class="chip"><b>Rules as Data</b> · אין if על סוג-כלי</div>
+    <div class="chip"><b>Open/Closed</b> · כלי חדש = entry, לא קוד</div>
+    <div class="chip"><b>Dependency Injection</b> · בלי monkeypatch</div>
+  </div>
+</div></section>
+
+<section id="quiz" class="quiz-hero"><div class="wrap">
+  <div class="sec-label">מבחן · חובה לעבור</div>
+  <h2>שבע שאלות. חמש נכונות = עברת.</h2>
+  <p>לא על שינון — על <b>הבנת המבנה</b>. אם תעני נכון, את יכולה להסביר את הפרויקט הזה למנטורית בלי הצילומים.</p>
+  <div id="quizbox">
+    <div class="q" data-correct="b"><div class="qn">שאלה 01</div><h4>מתי הלוח הלוגי משתנה אחרי <code>click</code>?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>מיד ברגע הלחיצה השנייה.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>רק כשהמהלך "מגיע", אחרי מספיק <code>wait</code>.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>ברגע ש-MoveValidator מאשר חוקיות.</div>
+      <div class="explain">הלוח משתנה רק בהגעה, בתוך <code>RealTimeArbiter.advance_time</code>. עד אז המהלך רק "בתנועה".</div></div>
+    <div class="q" data-correct="c"><div class="qn">שאלה 02</div><h4>איפה יושבים חוקי-התנועה של צריח, ואיך המנוע יודע אותם?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>ב-MoveValidator, עם <code>if piece == "R"</code>.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>ב-Board, לצד אחסון התאים.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>כ-rays בטבלת דאטה ב-Config; המנוע מפרש טבלה, לא מכיר "צריח".</div>
+      <div class="explain">חוקים=דאטה. Config מחזיק rays, ו-MoveValidator מפרש בלי if על סוג. זה מה שמאפשר "שחמט של שלומי".</div></div>
+    <div class="q" data-correct="a"><div class="qn">שאלה 03</div><h4>מי מחזיק את דגל ה-<code>game_over</code>, ומי רק <i>מדווח</i> שנאכל מלך?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>Game מחזיק את game_over; RealTimeArbiter רק מדווח.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>Board מחזיק אותו, כי הוא רואה את הכלים.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>RealTimeArbiter מחזיק ואוכף game_over לבד.</div>
+      <div class="explain">RTA מגלה עובדה (נאכל מלך) ומדווח. Game מחליט מה זה אומר (game_over) ואוכף אותו.</div></div>
+    <div class="q" data-correct="b"><div class="qn">שאלה 04</div><h4>מדוע ב-<code>_resolve_motion</code> בדיקת ה-reversal קורית <i>לפני</i> <code>board.move</code>?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>סתם קונבנציה, הסדר לא משנה.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>מהלך שמתבטל לא נוחת כלל — אסור להריץ עליו move/מלך/קידום.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>כדי לחסוך זמן ריצה.</div>
+      <div class="explain">ב-reversal המגיע נעלם באוויר. board.move היה מנחית אותו בטעות. לכן reversal ראשון עם return מוקדם.</div></div>
+    <div class="q" data-correct="c"><div class="qn">שאלה 05</div><h4>מה מפריד תנועת-חייל (ישר) מאכילת-חייל (אלכסון)?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>שדה <code>can_jump</code>.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>מספר ה-<code>max_steps</code>.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>שדה <code>target</code>: "empty" לתנועה ישרה, "enemy" לאכילה אלכסונית.</div>
+      <div class="explain">חייל הוא הכלי הראשון שבו תנועה אינה אכילה. השדה <code>target</code> מאפשר להביע את זה כדאטה.</div></div>
+    <div class="q" data-correct="a"><div class="qn">שאלה 06</div><h4>למה הטסטים משתמשים ב-<code>run(inp,out)</code> עם StringIO ולא ב-monkeypatch?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>Dependency Injection: מזריקים את ה-I/O כארגומנט, בלי לשנות קוד בזמן ריצה.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>כי monkeypatch לא עובד ב-Windows.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>כדי שהטסטים ירוצו מהר יותר.</div>
+      <div class="explain">monkeypatch משנה קוד בזמן ריצה — אסור. DI נקי: run מקבל זרמים, הטסט מזריק StringIO ובודק פלט.</div></div>
+    <div class="q" data-correct="b"><div class="qn">שאלה 07</div><h4>כלי חדש שזז 3 אלכסון ואוכל רק ישר. מה צריך לשנות?</h4>
+      <div class="opt" data-k="a"><span class="mark">א</span>לכתוב מחלקה חדשה שיורשת מ-Piece.</div>
+      <div class="opt" data-k="b"><span class="mark">ב</span>רק entry ב-<code>Config.movement</code> — rays עם target מתאים. אפס שינוי במנוע.</div>
+      <div class="opt" data-k="c"><span class="mark">ג</span>לערוך את MoveValidator ולהוסיף <code>if</code>.</div>
+      <div class="explain">מבחן ה-Open/Closed. הוספת כלי = דאטה ב-Config. המנוע מפרש rays בלי להכיר את הכלי.</div></div>
+  </div>
+</div></section>
+
+<div class="scorebar" id="scorebar">עני על השאלות — הציון יופיע כאן · <b id="score">0 / 7</b></div>
+<footer>Kung-Fu Chess · 8 מודולים · 116 טסטים · 100% כיסוי · rules-as-data<br>דוח ארכיטקטורה שנוצר לסקירת המנטורית</footer>
+
+<script>
+(function(){
+  document.querySelectorAll('.gq').forEach(function(b){ b.addEventListener('click',function(){ b.parentElement.classList.toggle('open'); }); });
+  document.querySelectorAll('.layer-head').forEach(function(h){ h.addEventListener('click',function(){ h.parentElement.classList.toggle('open'); }); });
+  document.querySelector('.layer').classList.add('open');
+  document.querySelectorAll('.fnbtn').forEach(function(btn){
+    btn.addEventListener('click',function(e){
+      e.stopPropagation();
+      var row=btn.closest('.fnrow'); var fid=row.getAttribute('data-fid');
+      var code=document.getElementById('code_'+fid);
+      row.classList.toggle('open'); code.classList.toggle('show');
+    });
+  });
+  var total=document.querySelectorAll('.q').length, answered={};
+  function refresh(){
+    var correct=0,done=0;
+    document.querySelectorAll('.q').forEach(function(q,i){ if(answered[i]==='right')correct++; if(answered[i])done++; });
+    var bar=document.getElementById('scorebar');
+    if(done<total){ bar.style.background='var(--accent)'; bar.innerHTML='ענית על '+done+' מתוך '+total+' · <b>'+correct+' / '+total+'</b>'; }
+    else if(correct>=5){ bar.style.background='var(--ok)'; bar.innerHTML='<span class="verdict">עברת! '+correct+' / '+total+' — את מבינה את המבנה. מוכנה למנטורית.</span>'; }
+    else{ bar.style.background='#8a3527'; bar.innerHTML='<span class="verdict">'+correct+' / '+total+' — צריך 5. עברי שוב על השכבות ונסי שוב.</span>'; }
+  }
+  document.querySelectorAll('.q').forEach(function(q,i){
+    var right=q.getAttribute('data-correct');
+    q.querySelectorAll('.opt').forEach(function(opt){
+      opt.addEventListener('click',function(){
+        if(q.classList.contains('answered'))return;
+        q.classList.add('answered');
+        var k=opt.getAttribute('data-k');
+        if(k===right){opt.classList.add('correct');answered[i]='right';}
+        else{opt.classList.add('wrong');answered[i]='wrong';q.querySelector('.opt[data-k="'+right+'"]').classList.add('correct');}
+        refresh();
+      });
+    });
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

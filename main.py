@@ -1,4 +1,9 @@
-# Repo: https://github.com/nirel5-create/kungfu-chess
+# ============================================================================
+#  Kung-Fu Chess
+#  Repo:    https://github.com/nirel5-create/kungfu-chess
+#  Report:  https://nirel5-create.github.io/kungfu-chess/ARCHITECTURE_REPORT.html
+#           (interactive, rendered architecture report)
+# ============================================================================
 import sys
 
 from model.config import Config
