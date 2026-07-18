@@ -1,3 +1,32 @@
+from collections import namedtuple
+
+# --- Ray targets -------------------------------------------------------------
+# What is allowed to sit on the destination cell for a ray to apply. Named so
+# that neither the movement table nor the validator carries a bare string.
+TARGET_ANY = "any"      # empty or enemy -- the normal case
+TARGET_EMPTY = "empty"  # must be unoccupied (a pawn's forward step)
+TARGET_ENEMY = "enemy"  # must hold an opponent (a pawn's diagonal capture)
+
+# --- Ray ---------------------------------------------------------------------
+# One movement option of one piece, as data. A piece's movement is just a list
+# of these, so adding a piece or changing how one moves is a table edit -- no
+# engine code is involved.
+#
+#   dr, dc     direction, in cells per step
+#   max_steps  how far it may travel; None = slide until blocked or off-board
+#   can_jump   True = ignore pieces in between (the knight)
+#   target     what may occupy the destination; see TARGET_* above
+#   gated      True = this ray only applies from the mover's own start row
+#              (Config.start_row). Lets reach depend on position without the
+#              engine ever branching on piece type.
+#
+# Defaults describe a sliding piece, so the common cases read short:
+#   Ray(-1, 0)                         -> slides up, any destination
+#   Ray(-1, 0, max_steps=1)            -> one step up
+#   Ray(-1, 1, max_steps=1, target=TARGET_ENEMY)   -> capture only
+Ray = namedtuple("Ray", "dr dc max_steps can_jump target gated")
+Ray.__new__.__defaults__ = (None, False, TARGET_ANY, False)
+
 # Default direction vectors for the standard chess movement patterns --
 # overridable via Config(orthogonal_deltas=..., diagonal_deltas=...,
 # knight_deltas=...) for custom piece geometry, no engine change needed.
@@ -12,30 +41,21 @@ _KNIGHT_DELTAS = (
 def _pawn_rules(direction):
     # direction: -1 = up the board (white), +1 = down the board (black).
     return [
-        (direction, 0, 1, False, "empty", False),   # forward one, always
-        (direction, 0, 2, False, "empty", True),    # forward two, only from start row
-        (direction, -1, 1, False, "enemy", False),  # capture diagonally
-        (direction, 1, 1, False, "enemy", False),
+        Ray(direction, 0, max_steps=1, target=TARGET_EMPTY),
+        Ray(direction, 0, max_steps=2, target=TARGET_EMPTY, gated=True),
+        Ray(direction, -1, max_steps=1, target=TARGET_ENEMY),
+        Ray(direction, 1, max_steps=1, target=TARGET_ENEMY),
     ]
 
 
 def _default_movement(orthogonal, diagonal, knight_deltas):
-    # Ray tuple: (dr, dc, max_steps, can_jump, target, gated).
-    # max_steps=None means "slide until blocked or off-board".
-    # target: "any" (empty or enemy ok), "empty" (must be unoccupied),
-    # or "enemy" (must hold an opposing piece) -- lets move geometry
-    # and capture geometry differ (needed for pawns).
-    # gated: False means always available; True means the ray only
-    # applies when the mover sits on ITS OWN start row
-    # (Config.start_row) -- lets reach depend on position with no
-    # branching on piece type anywhere in the engine.
     all_directions = orthogonal + diagonal
     return {
-        "K": [(dr, dc, 1, False, "any", False) for dr, dc in all_directions],
-        "Q": [(dr, dc, None, False, "any", False) for dr, dc in all_directions],
-        "R": [(dr, dc, None, False, "any", False) for dr, dc in orthogonal],
-        "B": [(dr, dc, None, False, "any", False) for dr, dc in diagonal],
-        "N": [(dr, dc, 1, True, "any", False) for dr, dc in knight_deltas],
+        "K": [Ray(dr, dc, max_steps=1) for dr, dc in all_directions],
+        "Q": [Ray(dr, dc) for dr, dc in all_directions],
+        "R": [Ray(dr, dc) for dr, dc in orthogonal],
+        "B": [Ray(dr, dc) for dr, dc in diagonal],
+        "N": [Ray(dr, dc, max_steps=1, can_jump=True) for dr, dc in knight_deltas],
         "wP": _pawn_rules(-1),
         "bP": _pawn_rules(1),
     }
@@ -43,7 +63,12 @@ def _default_movement(orthogonal, diagonal, knight_deltas):
 
 class Config:
     """All tunable rules live here. Nothing about *what* pieces exist,
-    how big a cell is, or how a move settles is hardcoded in the logic."""
+    how big a cell is, or how a move settles is hardcoded in the logic.
+
+    Config is also the only place that knows how a piece token is spelled.
+    Everyone else asks (color_of / type_of / is_king / rays_for), so swapping
+    the token for a different representation touches this class alone.
+    """
 
     def __init__(
         self,
@@ -64,8 +89,10 @@ class Config:
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty
-        # movement[piece_letter] -> ray tuples; see _default_movement() for the
-        # exact shape. Missing entry = unrestricted (any dst legal).
+        # movement[token or piece letter] -> list of Ray. A full token ("wP")
+        # wins over the bare letter ("P"), which is how the two pawn colours
+        # get opposite directions without the engine knowing what a pawn is.
+        # Missing entry = unrestricted; see rays_for.
         self.movement = (
             _default_movement(orthogonal_deltas, diagonal_deltas, knight_deltas)
             if movement is None
@@ -82,17 +109,35 @@ class Config:
         # ms a piece stays airborne after `jump`.
         self.jump_ms = jump_ms
 
+    # --- token layout: the only class that reads a token's insides ----------
+
+    def color_of(self, token):
+        return token[0]
+
+    def type_of(self, token):
+        return token[1]
+
+    def is_king(self, token):
+        return self.type_of(token) == self.king_type
+
     def is_valid_token(self, token):
         if token == self.empty:
             return True
         return (
             len(token) == 2
-            and token[0] in self.colors
-            and token[1] in self.piece_types
+            and self.color_of(token) in self.colors
+            and self.type_of(token) in self.piece_types
         )
 
     def same_color(self, token_a, token_b):
-        return token_a[0] == token_b[0]
+        return self.color_of(token_a) == self.color_of(token_b)
+
+    # --- movement table lookup ---------------------------------------------
+
+    def rays_for(self, token):
+        """The movement options of this piece, or None if none are defined
+        (which the validator reads as unrestricted)."""
+        return self.movement.get(token, self.movement.get(self.type_of(token)))
 
     def travel_time(self, src, dst):
         # Cell-step count (Chebyshev distance), not Euclidean: a diagonal
@@ -122,4 +167,5 @@ class Config:
         promoted = self.promotions.get(piece)
         if promoted is None:
             return None
-        return promoted if arrival_row == self.promotion_row(piece[0], board) else None
+        expected = self.promotion_row(self.color_of(piece), board)
+        return promoted if arrival_row == expected else None

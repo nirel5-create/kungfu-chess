@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kung-Fu Chess — איך הארכיטקטורה עובדת</title>
+<style>
+  :root{
+    --paper:#f2ece1; --surface:#fffdf8;
+    --ink:#16120c; --ink-2:#403a30; --muted:#6f685b;
+    --line:#e2d8c6; --line-2:#d4c9b4;
+    --accent:#a5271a; --accent-ink:#871d12; --accent-soft:#eacca6;
+    --gold:#bd8c26; --ok:#3d7a51;
+    --sq-d:#2c2820; --sq-l:#e6dcc8;
+    --model:#2f6f7d; --rules:#7a5aa8; --realtime:#a5271a; --engine:#bd8c26; --io:#556070;
+    --mono:"JetBrains Mono","SFMono-Regular",ui-monospace,"Menlo","Consolas",monospace;
+    --serif:"Frank Ruhl Libre","Iowan Old Style","Palatino Linotype","Georgia",serif;
+    --sans:"Assistant","Rubik","Heebo","Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+    --r:12px; --r2:8px; --r3:6px;
+    --sh1:0 1px 2px rgba(22,18,12,.04),0 2px 8px rgba(22,18,12,.05);
+    --sh2:0 8px 22px -10px rgba(22,18,12,.24);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0;color:var(--ink);font-family:var(--sans);line-height:1.72;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(1200px 500px at 82% -10%,rgba(189,140,38,.06),transparent 60%),
+               radial-gradient(900px 480px at 8% 4%,rgba(165,39,26,.05),transparent 55%),var(--paper);}
+  ::selection{background:var(--accent);color:#fff;}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 24px;}
+  code{font-family:var(--mono);background:#ece3d1;border:1px solid #ddd0b9;padding:.06em .4em;border-radius:5px;font-size:.86em;color:#5a2018;direction:ltr;display:inline-block;}
+
+  .eyebrow::before,.sec-label::before{content:"";width:22px;height:11px;flex:none;border-radius:2px;border:1px solid var(--ink);
+    background:linear-gradient(90deg,var(--sq-d) 0 50%,var(--sq-l) 50% 100%);display:inline-block;}
+
+  header.hero{position:relative;overflow:hidden;border-bottom:3px solid var(--ink);
+    background:radial-gradient(1100px 460px at 84% -18%,rgba(189,140,38,.08),transparent 60%),
+               linear-gradient(180deg,#f6f0e6,var(--paper));}
+  header.hero::after{content:"";position:absolute;inset-inline:0;bottom:0;height:10px;
+    background:repeating-linear-gradient(90deg,var(--sq-d) 0 58px,var(--sq-l) 58px 116px);opacity:.9;}
+  .hero-inner{position:relative;z-index:2;padding:60px 24px 44px;max-width:1020px;margin:0 auto;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;display:flex;gap:11px;align-items:center;}
+  h1{font-family:var(--serif);font-weight:800;font-size:clamp(2.1rem,5.2vw,3.4rem);line-height:1.05;margin:.3em 0 .16em;letter-spacing:-.015em;}
+  h1 .kf{color:var(--accent);background:linear-gradient(transparent 78%,rgba(165,39,26,.18) 0);}
+  .subtitle{font-size:1.06rem;max-width:64ch;color:var(--ink-2);}
+  .stat-row{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px;}
+  .stat{position:relative;background:linear-gradient(180deg,#211c15,var(--ink));color:var(--paper);border-radius:var(--r2);padding:12px 18px 10px;box-shadow:var(--sh2);}
+  .stat b{font-family:var(--serif);font-size:1.35rem;font-weight:800;display:block;line-height:1.1;color:#fff;}
+  .stat span{font-family:var(--mono);font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72;}
+  .stat::after{content:"";position:absolute;inset-inline-start:0;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--accent);}
+
+  section{padding:52px 0;position:relative;}
+  section+section::before{content:"";position:absolute;top:0;inset-inline:24px;height:1px;background:repeating-linear-gradient(90deg,var(--line-2) 0 10px,transparent 10px 20px);}
+  .sec-label{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:11px;}
+  h2{font-family:var(--serif);font-weight:800;font-size:clamp(1.6rem,3.4vw,2.2rem);margin:.06em 0 .5em;letter-spacing:-.015em;line-height:1.14;}
+  h3{font-family:var(--serif);font-weight:700;font-size:1.16rem;margin:1.5em 0 .3em;}
+  p{max-width:74ch;}
+  .lead{font-size:1.08rem;color:var(--ink-2);} .lead b{color:var(--ink);}
+
+  /* ---- layer stack diagram ---- */
+  .stack{display:flex;flex-direction:column;gap:0;margin:26px 0 8px;}
+  .layer{position:relative;background:var(--surface);border:1px solid var(--line);padding:14px 18px;box-shadow:var(--sh1);transition:transform .16s,box-shadow .16s;}
+  .layer:first-child{border-radius:var(--r) var(--r) 0 0;}
+  .layer:last-child{border-radius:0 0 var(--r) var(--r);}
+  .layer+.layer{border-top:none;}
+  .layer:hover{transform:translateX(-4px);box-shadow:var(--sh2);z-index:2;}
+  .layer::before{content:"";position:absolute;inset-inline-start:0;inset-block:0;width:4px;background:var(--c);}
+  .lhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .lname{font-family:var(--mono);font-weight:700;font-size:.95rem;color:var(--c);}
+  .lfile{font-family:var(--mono);font-size:.68rem;color:var(--muted);}
+  .lrole{margin-inline-start:auto;font-size:.85rem;color:var(--ink-2);}
+  .lowns{font-size:.82rem;color:var(--muted);margin-top:5px;}
+  .lowns b{color:var(--ink-2);font-weight:600;}
+  .arrow{text-align:center;font-family:var(--mono);font-size:.62rem;color:var(--muted);letter-spacing:.1em;padding:3px 0;background:var(--paper);}
+
+  /* ---- flow ---- */
+  .flow{display:flex;flex-wrap:wrap;margin:22px 0 6px;font-family:var(--mono);box-shadow:var(--sh1);border-radius:var(--r2);}
+  .step{position:relative;flex:1;min-width:120px;background:var(--surface);border:1px solid var(--line-2);padding:13px 10px 11px;text-align:center;transition:box-shadow .18s,border-color .18s;}
+  .step+.step{margin-inline-start:-1px;}
+  .flow>.step:first-child{border-start-start-radius:var(--r2);border-end-start-radius:var(--r2);}
+  .flow>.step:last-child{border-start-end-radius:var(--r2);border-end-end-radius:var(--r2);}
+  .step::before{content:"";position:absolute;inset-block-start:0;inset-inline:0;height:3px;background:var(--c);opacity:.85;}
+  .step:hover{z-index:3;border-color:var(--c);box-shadow:var(--sh2);}
+  .step .n{font-size:.56rem;letter-spacing:.14em;color:var(--muted);font-weight:700;}
+  .step .m{font-size:.8rem;font-weight:700;margin-top:3px;color:var(--ink);}
+  .step .d{font-size:.62rem;color:var(--muted);font-family:var(--sans);margin-top:4px;line-height:1.45;}
+
+  /* ---- simulation ---- */
+  .sim{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:20px;box-shadow:var(--sh1);margin-top:22px;}
+  .simgrid{display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:start;}
+  @media (max-width:720px){.simgrid{grid-template-columns:1fr;}}
+  #boardWrap{position:relative;width:340px;height:340px;flex:none;border:2px solid var(--ink);border-radius:var(--r3);overflow:hidden;background:var(--sq-l);}
+  .sq{position:absolute;}
+  .pc{position:absolute;width:60px;height:60px;margin:4px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+      font-family:var(--mono);font-weight:700;font-size:.82rem;transition:none;box-shadow:0 2px 5px rgba(0,0,0,.3);}
+  .pc.w{background:#f7f2e6;color:#1a1610;border:2px solid #1a1610;}
+  .pc.b{background:#231f18;color:#f2ece1;border:2px solid #050403;}
+  .pc.mv{box-shadow:0 0 0 3px var(--accent),0 4px 12px rgba(0,0,0,.4);}
+  .ctrl{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
+  button.b{font-family:var(--mono);font-size:.74rem;font-weight:700;background:var(--ink);color:var(--paper);border:none;
+    padding:8px 14px;border-radius:var(--r3);cursor:pointer;box-shadow:var(--sh1);}
+  button.b:hover{background:var(--accent);}
+  button.b:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  #clock{font-family:var(--mono);font-size:.74rem;color:var(--muted);}
+  input[type=range]{flex:1;min-width:130px;accent-color:var(--accent);}
+  .readout{font-family:var(--mono);font-size:.7rem;background:#20201b;color:#ece5d7;border-radius:var(--r2);padding:12px 14px;
+    direction:ltr;text-align:left;white-space:pre;overflow-x:auto;line-height:1.65;border:1px solid #35322b;min-height:150px;}
+  .legend{font-size:.8rem;color:var(--muted);margin-top:10px;}
+  .legend b{color:var(--accent-ink);}
+
+  pre.code{margin:10px 0;background:linear-gradient(180deg,#20201b,#191813);color:#ece5d7;border-radius:var(--r2);padding:14px 16px;overflow-x:auto;
+    font-family:var(--mono);font-size:.76rem;line-height:1.62;direction:ltr;text-align:left;border:1px solid #35322b;white-space:pre;}
+  pre.code::-webkit-scrollbar{height:9px;}
+  pre.code::-webkit-scrollbar-thumb{background:#4a463d;border-radius:9px;}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:.88rem;}
+  th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line-2);}
+  tr:hover td{background:#f6efe3;}
+  td.no{color:var(--accent-ink);} td.yes{color:var(--ok);}
+
+  .verdict{margin-top:12px;border-inline-start:3px solid var(--accent);background:#fbf5ec;padding:11px 15px;border-radius:0 var(--r3) var(--r3) 0;font-size:.94rem;}
+  .verdict b{color:var(--accent-ink);}
+  .verdict.ok{border-inline-start-color:var(--ok);background:#f0f6f1;} .verdict.ok b{color:var(--ok);}
+  .quote{font-size:.88rem;color:var(--muted);border-inline-start:2px solid var(--line-2);padding:2px 12px;margin:8px 0;font-style:italic;}
+  footer{padding:34px 24px 54px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.72rem;letter-spacing:.05em;line-height:1.9;}
+  @media print{body{background:#fff;} .sim{break-inside:avoid;}}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">ארכיטקטורה · הסבר ויזואלי</div>
+    <h1>איך <span class="kf">קונג‑פו שחמט</span><br>בנוי מבפנים</h1>
+    <p class="subtitle">שכבה אחת לכל אחריות, תלות בכיוון אחד, וכללי משחק שהם דאטה ולא קוד. הדף הזה מראה את המבנה, ומריץ משחק אמיתי כדי להוכיח אותו.</p>
+    <div class="stat-row">
+      <div class="stat"><b>136</b><span>tests</span></div>
+      <div class="stat"><b>100%</b><span>coverage</span></div>
+      <div class="stat"><b>22K</b><span>fuzz games</span></div>
+      <div class="stat"><b>0</b><span>edits for a new piece</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section>
+  <div class="sec-label">הרעיון המרכזי</div>
+  <h2>הכלל היחיד שמסביר את הכל</h2>
+  <p class="lead"><b>כל שכבה יודעת רק על מה שמתחתיה.</b> החץ אף פעם לא מצביע כלפי מעלה. אם אתה נוחת כאן בפעם הראשונה וצריך לתקן משהו — השאלה היחידה היא "לאיזו שכבה זה שייך", והתשובה תמיד יחידה.</p>
+  <div class="quote">"The direction of dependency never points from model to UI." — Design Guide §5</div>
+  <p class="lead">מזה נובע כל השאר: אפשר לבדוק כל שכבה לבד, אפשר להחליף את האחסון בלי לגעת בחוקים, ואפשר להוסיף כלי בלי לגעת באף שורת קוד.</p>
+</section>
+
+<section>
+  <div class="sec-label">המבנה</div>
+  <h2>חמש שכבות, מלמעלה למטה</h2>
+  <p class="lead">ריחוף על שכבה מרים אותה. כל אחת אומרת מה היא מחזיקה — ובעיקר מה היא <b>לא</b>.</p>
+
+  <div class="stack">
+    <div class="layer" style="--c:var(--io)">
+      <div class="lhead"><span class="lname">main</span><span class="lfile">main.py</span>
+        <span class="lrole">קורא טקסט, מרכיב את האובייקטים, מדפיס</span></div>
+      <div class="lowns">מחזיק: <b>נקודת כניסה, פרסינג, פלט.</b> לא מחזיק: שום חוק משחק, שום מצב.</div>
+    </div>
+    <div class="arrow">▼ &nbsp; יוצר ומריץ &nbsp; ▼</div>
+    <div class="layer" style="--c:var(--engine)">
+      <div class="lhead"><span class="lname">engine</span><span class="lfile">engine/game.py</span>
+        <span class="lrole">מתאם. שומרי־סף ואצילה</span></div>
+      <div class="lowns">מחזיק: <b>בחירה, game_over, מיהו רשאי לזוז עכשיו.</b> לא מחזיק: איך כלי זז, איך זמן עובר, איך מציירים.</div>
+    </div>
+    <div class="arrow">▼ &nbsp; שואל "חוקי?" &nbsp;·&nbsp; מצווה "התחל תנועה" &nbsp; ▼</div>
+    <div class="layer" style="--c:var(--rules)">
+      <div class="lhead"><span class="lname">rules</span><span class="lfile">rules/rules.py</span>
+        <span class="lrole">גאומטריה. עונה כן/לא בלבד</span></div>
+      <div class="lowns">מחזיק: <b>האם היעד ישיג.</b> לא מחזיק: זמן, תור, שינוי לוח. חסר־מצב לגמרי — ואף פעם לא יודע מה זה "צריח".</div>
+    </div>
+    <div class="layer" style="--c:var(--realtime)">
+      <div class="lhead"><span class="lname">realtime</span><span class="lfile">realtime/arbiter.py</span>
+        <span class="lrole">זמן. מי באוויר, מי נחת, מי נאכל</span></div>
+      <div class="lowns">מחזיק: <b>השעון, התנועות הפעילות, סדר ההגעות, אכילות.</b> לא מחזיק: חוקיות מהלך, קליקים, ציור.</div>
+    </div>
+    <div class="arrow">▼ &nbsp; קורא תאים &nbsp;·&nbsp; כותב רק בהגעה &nbsp; ▼</div>
+    <div class="layer" style="--c:var(--model)">
+      <div class="lhead"><span class="lname">model</span><span class="lfile">model/{board,config,motion,jump}.py</span>
+        <span class="lrole">התחתית. נתונים בלבד</span></div>
+      <div class="lowns">מחזיק: <b>מי יושב איפה, וכל כללי המשחק כדאטה.</b> לא מחזיק: פיקסלים, זמן, קליקים, ציור. לא מייבא כלום מלמעלה.</div>
+    </div>
+  </div>
+  <div class="verdict"><b>הכיוון:</b> <code>main → engine → {realtime, rules} → model</code>. גרף מכוון חסר‑מעגלים. <code>rules</code> ו‑<code>model</code> לא מייבאים אף אחד מעליהם — לכן אפשר לבדוק אותם בלי להריץ משחק.</div>
+</section>
+
+<section>
+  <div class="sec-label">מסלול הפקודה</div>
+  <h2>מה קורה כשלוחצים על כלי</h2>
+  <div class="flow">
+    <div class="step" style="--c:var(--io)"><div class="n">1</div><div class="m">click x y</div><div class="d">פיקסלים נכנסים</div></div>
+    <div class="step" style="--c:var(--engine)"><div class="n">2</div><div class="m">→ תא</div><div class="d">פיקסל מחולק בגודל תא</div></div>
+    <div class="step" style="--c:var(--engine)"><div class="n">3</div><div class="m">בחירה</div><div class="d">ראשון בוחר, שני מצווה</div></div>
+    <div class="step" style="--c:var(--engine)"><div class="n">4</div><div class="m">שומרי־סף</div><div class="d">נגמר? הכלי כבר זז?</div></div>
+    <div class="step" style="--c:var(--rules)"><div class="n">5</div><div class="m">חוקי?</div><div class="d">גאומטריה בלבד</div></div>
+    <div class="step" style="--c:var(--realtime)"><div class="n">6</div><div class="m">Motion</div><div class="d">מחושב זמן הגעה</div></div>
+    <div class="step" style="--c:var(--realtime)"><div class="n">7</div><div class="m">wait</div><div class="d">שעון מתקדם, הגעות נפתרות</div></div>
+    <div class="step" style="--c:var(--model)"><div class="n">8</div><div class="m">Board</div><div class="d">משתנה רק כאן, רק בהגעה</div></div>
+  </div>
+  <div class="verdict"><b>שימי לב לשלב 8.</b> הלוח משתנה <b>רק בהגעה</b>, אף פעם לא בלחיצה. כלי בתנועה נשאר לוגית על תא המקור שלו עד שהוא נוחת — וזה מה שהופך את <code>print board</code> לדטרמיניסטי ומאפשר לרנדרר לצייר אותו באמצע הדרך.</div>
+</section>
+
+<section>
+  <div class="sec-label">סימולציה</div>
+  <h2>משחק אמיתי, רץ מהמנוע</h2>
+  <p class="lead">הפריימים למטה הופקו על ידי <code>tools/simulate.py</code> מהמנוע האמיתי — לא אנימציה מזויפת. <b>שלושה כלים באוויר בו‑זמנית</b>, בדיוק מה שהמודל הפר‑כלי מאפשר. טבעת אדומה = בתנועה.</p>
+
+  <div class="sim">
+    <div class="ctrl">
+      <button class="b" id="play">▶ נגן</button>
+      <button class="b" id="reset">↻ אתחל</button>
+      <input type="range" id="scrub" min="0" value="0">
+      <span id="clock">t = 0ms</span>
+    </div>
+    <div class="simgrid">
+      <div id="boardWrap"></div>
+      <div>
+        <div class="readout" id="readout"></div>
+        <div class="legend">מה שהרנדרר מקבל: <b>מיקום לוגי</b> (row/col) למי שיושב, ו<b>מיקום פיקסלים מְחוֹשָב</b> (x/y) למי שבאוויר. זה בדיוק ה‑snapshot — ולכן אפשר לבנות גרפיקה בלי לגעת במנוע.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-label">ההבטחה</div>
+  <h2>"המשחק של שלומי" — הכל דאטה</h2>
+  <p class="lead">התנועה של כל כלי היא רשימת <code>Ray</code>. זהו. אין <code>if piece == "R"</code> בשום מקום במנוע — חיפשי, לא תמצאי.</p>
+  <pre class="code"># מוסיפים כלי חדש לגמרי -- "דרקון": עד 3 באלכסון לריק, אוכל רק ישר
+movement["D"] = ([Ray(dr, dc, max_steps=3, target=TARGET_EMPTY) for dr, dc in DIAGONAL]
+               + [Ray(dr, dc, max_steps=1, target=TARGET_ENEMY) for dr, dc in ORTHOGONAL])
+
+# משנים כלל קיים -- הצריח של שלומי זז עד 2 בלבד
+movement["R"] = [Ray(dr, dc, max_steps=2) for dr, dc in ORTHOGONAL]
+
+# הרעיון מהמייל -- חייל שמגיע לסוף הולך אחורה, במקום להפוך למלכה
+movement["wP2"] = [Ray(1, 0, max_steps=1, target=TARGET_EMPTY)]
+config = Config(movement=movement, promotions={"wP": "wP2"})
+
+# שורות שנגעו בקוד המקור: 0</pre>
+  <div class="verdict ok"><b>מאומת, לא מובטח.</b> שלושת התרחישים האלה הם טסטים אמיתיים בחבילה (<code>TestCustomGameIsDataOnly</code>). אם מישהו יום אחד יחזיר <code>if</code> על סוג כלי לתוך המנוע — הם ייפלו.</div>
+
+  <h3>למה זה עובד: <code>Ray</code></h3>
+  <table>
+    <tr><th>שדה</th><th>משמעות</th></tr>
+    <tr><td><code>dr, dc</code></td><td>כיוון, בתאים לצעד</td></tr>
+    <tr><td><code>max_steps</code></td><td>כמה רחוק. <code>None</code> = מחליק עד שנחסם</td></tr>
+    <tr><td><code>can_jump</code></td><td>מתעלם ממה שבדרך (הפרש)</td></tr>
+    <tr><td><code>target</code></td><td>מה מותר לשבת ביעד: <code>ANY</code> / <code>EMPTY</code> / <code>ENEMY</code></td></tr>
+    <tr><td><code>gated</code></td><td>הקרן פעילה רק משורת ההתחלה (הצעד הכפול)</td></tr>
+  </table>
+  <p style="font-size:.9rem;color:var(--muted)">שדות עם שם וברירות מחדל, לא tuple פוזיציוני. <code>Ray(-1, 0)</code> = מחליק למעלה. <code>Ray(-1, 1, max_steps=1, target=TARGET_ENEMY)</code> = אוכל באלכסון בלבד. הכלל של המשחק קריא כמו משפט.</p>
+</section>
+
+<section>
+  <div class="sec-label">גבולות</div>
+  <h2>מי יודע מה — וכמה זה עולה להחליף</h2>
+  <table>
+    <tr><th>אם תשנו את זה…</th><th>כמה קבצים נוגעים</th><th>למה</th></tr>
+    <tr><td>ייצוג הלוח (למשל בינארי)</td><td class="yes">Board בלבד</td><td>אף אחד לא יודע איך תא מאוחסן. שואלים <code>piece_at</code>.</td></tr>
+    <tr><td>מבנה הטוקן של כלי</td><td class="yes">Config בלבד</td><td>רק Config קורא בתוך טוקן. השאר שואלים <code>color_of</code> / <code>type_of</code> / <code>is_king</code>.</td></tr>
+    <tr><td>כלי חדש / כלל תנועה</td><td class="yes">אף אחד</td><td>דאטה ב‑Config.</td></tr>
+    <tr><td>מהירות / גודל תא / מי המלך</td><td class="yes">אף אחד</td><td>פרמטרים ל‑Config.</td></tr>
+    <tr><td>מודל הזמן</td><td>arbiter בלבד</td><td>הוא הבעלים היחיד של השעון והתנועות.</td></tr>
+  </table>
+  <div class="verdict"><b>המבחן שהמייל דורש:</b> "לא יתכן שקלאס שומר במבנה פנימי משהו וקלאס אחר יודע בדיוק איזה מפתח לשלוף". נבדק: אף מחלקה מחוץ ל‑<code>Config</code> לא נוגעת ב‑<code>piece[0]</code> או <code>piece[1]</code>, ואף מחלקה מחוץ ל‑<code>Board</code> לא נוגעת ב‑grid.</div>
+</section>
+
+<section>
+  <div class="sec-label">אימות</div>
+  <h2>איך יודעים שזה באמת עובד</h2>
+  <p class="lead">טסטים בודקים מקרים שחשבנו עליהם. <b>אינווריאנטות בודקות את מה שלא חשבנו עליו.</b> הפאזר משחק אלפי משחקים אקראיים ובודק אחרי כל צעד חמישה דברים שחייבים להיות נכונים תמיד:</p>
+  <table>
+    <tr><th>#</th><th>אינווריאנטה</th><th>מה היא תפסה</th></tr>
+    <tr><td>1</td><td>מספר הכלים אף פעם לא עולה</td><td>—</td></tr>
+    <tr><td>2</td><td>תא המקור של תנועה פעילה מחזיק כלי בצבע של הזז</td><td class="no">תנועת רפאים שקטלפה כלי</td></tr>
+    <tr><td>3</td><td>כל טוקן על הלוח מוכר ל‑Config</td><td>—</td></tr>
+    <tr><td>4</td><td>אחרי game_over הלוח קפוא</td><td class="no">כלים נחתו אחרי שהמשחק נגמר</td></tr>
+    <tr><td>5</td><td><code>wait(a); wait(b)</code> ≡ <code>wait(a+b)</code></td><td class="no">התיקון הראשון ל‑#4 שבר את זה</td></tr>
+  </table>
+  <div class="verdict"><b>22,000 משחקים אקראיים — נקי.</b> שלושת הבאגים שהאינווריאנטות תפסו לא ניתנים לביטוי כ‑<code>print board</code>, ולכן שום סקריפט טקסטואלי לא היה מוצא אותם.</div>
+</section>
+
+</div>
+
+<footer>
+  Kung-Fu Chess · הסבר ארכיטקטורה · הסימולציה הופקה מ‑tools/simulate.py על המנוע האמיתי<br>
+  main → engine → {realtime, rules} → model
+</footer>
+
+<script>
+const SIM = {"rows":5,"cols":5,"cell":100,"frames":[{"t":0,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":0.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200,"y":200,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":400.0,"moving":true}],"game_over":false},{"t":100,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":10.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200,"y":200,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":390.0,"moving":true}],"game_over":false},{"t":200,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":20.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200,"y":200,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":380.0,"moving":true}],"game_over":false},{"t":300,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":30.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200,"y":200,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":370.0,"moving":true}],"game_over":false},{"t":400,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":40.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200,"y":200,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":360.0,"moving":true}],"game_over":false},{"t":500,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":50.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":200.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":350.0,"moving":true}],"game_over":false},{"t":600,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":60.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":210.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":340.0,"moving":true}],"game_over":false},{"t":700,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":70.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":220.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":330.0,"moving":true}],"game_over":false},{"t":800,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":80.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":230.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":320.0,"moving":true}],"game_over":false},{"t":900,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":90.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":240.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":310.0,"moving":true}],"game_over":false},{"t":1000,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":100.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":250.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":300.0,"moving":true}],"game_over":false},{"t":1100,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":110.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":260.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":290.0,"moving":true}],"game_over":false},{"t":1200,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":120.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":270.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":280.0,"moving":true}],"game_over":false},{"t":1300,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":130.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":280.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":270.0,"moving":true}],"game_over":false},{"t":1400,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":140.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":2,"col":2,"x":200.0,"y":290.0,"moving":true},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":260.0,"moving":true}],"game_over":false},{"t":1500,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":150.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":250.0,"moving":true}],"game_over":false},{"t":1600,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":160.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":240.0,"moving":true}],"game_over":false},{"t":1700,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":170.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":230.0,"moving":true}],"game_over":false},{"t":1800,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":180.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":220.0,"moving":true}],"game_over":false},{"t":1900,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":190.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":210.0,"moving":true}],"game_over":false},{"t":2000,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":200.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":200.0,"moving":true}],"game_over":false},{"t":2100,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":210.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":190.0,"moving":true}],"game_over":false},{"t":2200,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":220.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":180.0,"moving":true}],"game_over":false},{"t":2300,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":230.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":170.0,"moving":true}],"game_over":false},{"t":2400,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":240.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":160.0,"moving":true}],"game_over":false},{"t":2500,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":250.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":150.0,"moving":true}],"game_over":false},{"t":2600,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":260.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":140.0,"moving":true}],"game_over":false},{"t":2700,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":270.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":130.0,"moving":true}],"game_over":false},{"t":2800,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":280.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":120.0,"moving":true}],"game_over":false},{"t":2900,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":290.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":110.0,"moving":true}],"game_over":false},{"t":3000,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":300.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":100.0,"moving":true}],"game_over":false},{"t":3100,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":310.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":90.0,"moving":true}],"game_over":false},{"t":3200,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":320.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":80.0,"moving":true}],"game_over":false},{"t":3300,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":330.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":70.0,"moving":true}],"game_over":false},{"t":3400,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":340.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":60.0,"moving":true}],"game_over":false},{"t":3500,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":350.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":50.0,"moving":true}],"game_over":false},{"t":3600,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":360.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":40.0,"moving":true}],"game_over":false},{"t":3700,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":370.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":30.0,"moving":true}],"game_over":false},{"t":3800,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":380.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":20.0,"moving":true}],"game_over":false},{"t":3900,"pieces":[{"token":"bR","row":0,"col":0,"x":0.0,"y":390.0,"moving":true},{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"wK","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":10.0,"moving":true}],"game_over":false},{"t":4000,"pieces":[{"token":"bK","row":0,"col":4,"x":400,"y":0,"moving":false},{"token":"bP","row":3,"col":2,"x":200,"y":300,"moving":false},{"token":"bR","row":4,"col":0,"x":0,"y":400,"moving":false},{"token":"wR","row":4,"col":4,"x":400.0,"y":0.0,"moving":true}],"game_over":true}]}
+;
+
+(function(){
+  const wrap = document.getElementById('boardWrap');
+  const scrub = document.getElementById('scrub');
+  const clock = document.getElementById('clock');
+  const readout = document.getElementById('readout');
+  const playBtn = document.getElementById('play');
+  const resetBtn = document.getElementById('reset');
+  const SZ = 340 / SIM.cols;              // on-screen cell
+  const K = SZ / SIM.cell;               // engine px -> screen px
+  let i = 0, timer = null;
+
+  // board squares
+  for (let r = 0; r < SIM.rows; r++) {
+    for (let c = 0; c < SIM.cols; c++) {
+      const d = document.createElement('div');
+      d.className = 'sq';
+      d.style.cssText = `left:${c*SZ}px;top:${r*SZ}px;width:${SZ}px;height:${SZ}px;` +
+                        `background:${(r+c)%2 ? '#2c2820' : '#e6dcc8'}`;
+      wrap.appendChild(d);
+    }
+  }
+  const layer = document.createElement('div');
+  wrap.appendChild(layer);
+  scrub.max = SIM.frames.length - 1;
+
+  function draw(n){
+    const f = SIM.frames[n];
+    layer.innerHTML = '';
+    f.pieces.forEach(p => {
+      const e = document.createElement('div');
+      e.className = 'pc ' + (p.token[0] === 'w' ? 'w' : 'b') + (p.moving ? ' mv' : '');
+      const s = SZ - 8;
+      e.style.cssText = `left:${p.x*K}px;top:${p.y*K}px;width:${s}px;height:${s}px;margin:4px`;
+      e.textContent = p.token;
+      layer.appendChild(e);
+    });
+    clock.textContent = 't = ' + f.t + 'ms' + (f.game_over ? '  ·  GAME OVER' : '');
+    const air = f.pieces.filter(p => p.moving);
+    readout.textContent =
+      'GameSnapshot  t=' + f.t + 'ms\n' +
+      '  in flight: ' + air.length + '\n\n' +
+      f.pieces.map(p =>
+        '  ' + p.token +
+        '  cell=(' + p.row + ',' + p.col + ')' +
+        '  px=(' + String(Math.round(p.x)).padStart(3) + ',' +
+                   String(Math.round(p.y)).padStart(3) + ')' +
+        (p.moving ? '  << moving' : '')
+      ).join('\n') +
+      (f.game_over ? '\n\n  game_over = true' : '');
+    scrub.value = n;
+  }
+
+  function stop(){ clearInterval(timer); timer = null; playBtn.textContent = '▶ נגן'; }
+  playBtn.onclick = () => {
+    if (timer) { stop(); return; }
+    if (i >= SIM.frames.length - 1) i = 0;
+    playBtn.textContent = '❚❚ עצור';
+    timer = setInterval(() => {
+      i++;
+      if (i >= SIM.frames.length) { i = SIM.frames.length - 1; stop(); return; }
+      draw(i);
+    }, 110);
+  };
+  resetBtn.onclick = () => { stop(); i = 0; draw(0); };
+  scrub.oninput = () => { stop(); i = +scrub.value; draw(i); };
+  draw(0);
+})();
+</script>
+</body>
+</html>

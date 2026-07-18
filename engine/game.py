@@ -1,58 +1,59 @@
 from realtime.arbiter import RealTimeArbiter
-from rules.rules import MoveValidator
+from model.snapshot import GameSnapshot, PieceView, STATE_IDLE, STATE_MOVING
+from engine.results import (
+    MoveResult, ACCEPTED, REASON_GAME_OVER, REASON_MOTION_IN_PROGRESS, REASON_AIRBORNE,
+)
+from rules.rules import RuleEngine
 
 
-class Game:
-    """Selection FSM plus application-level guards (game-over, jump
-    eligibility). Knows nothing about storage, timing, or I/O --
-    RealTimeArbiter owns motion/jump state and simulated time."""
+class GameEngine:
+    """Application service. Applies the guards that are about the *game* --
+    is it over, is this piece already busy -- then delegates: legality to
+    MoveValidator, time and motion to RealTimeArbiter.
 
-    REASON_GAME_OVER = "game_over"
-    REASON_MOTION_IN_PROGRESS = "motion_in_progress"
-    REASON_AIRBORNE = "airborne"
+    Owns the game-over flag and nothing else. It holds no pixels, no
+    selection, no rendering, and no piece-specific movement logic.
 
-    def __init__(self, board, config):
+    Collaborators may be injected; by default it composes the real ones. That
+    is what lets a test hand it a fake arbiter instead of monkeypatching.
+    """
+
+    # Re-exported so callers can compare against GameEngine.REASON_* without
+    # importing the results module.
+    REASON_GAME_OVER = REASON_GAME_OVER
+    REASON_MOTION_IN_PROGRESS = REASON_MOTION_IN_PROGRESS
+    REASON_AIRBORNE = REASON_AIRBORNE
+
+    def __init__(self, board, config, validator=None, arbiter=None):
         self._board = board
         self._config = config
-        self._validator = MoveValidator(board, config)
-        self._rta = RealTimeArbiter(board, config)
-        self._selection = None  # (row, col) or None
+        self._validator = validator or RuleEngine(board, config)
+        self._rta = arbiter or RealTimeArbiter(board, config)
         self._game_over = False
 
-    def _pixel_to_cell(self, x, y):
-        return y // self._config.cell_size, x // self._config.cell_size
+    @property
+    def game_over(self):
+        return self._game_over
 
-    def click(self, x, y):
-        row, col = self._pixel_to_cell(x, y)
-        if not self._board.in_bounds(row, col):
-            return  # outside the board -> ignored
-        target = self._board.piece_at(row, col)
-        if self._selection is None:
-            if target is not None:
-                self._selection = (row, col)  # select
-            return  # empty cell with no selection -> ignored
-        selected = self._board.piece_at(*self._selection)
-        if target is not None and self._config.same_color(target, selected):
-            self._selection = (row, col)  # replace selection
-            return
-        self._request_move(self._selection, (row, col))
-        self._selection = None
-
-    def _request_move(self, src, dst):
+    def request_move(self, src, dst):
+        """-> MoveResult (guide S9). reason is always set: "ok" when accepted,
+        an application-level reason when this layer refuses, or the rule-level
+        reason copied straight from MoveValidation."""
         if self._game_over:
-            return self.REASON_GAME_OVER  # board untouched, nothing else checked
-        if self._rta.has_active_motion():
-            return self.REASON_MOTION_IN_PROGRESS  # board untouched, no motion started
+            return MoveResult(False, REASON_GAME_OVER)  # board untouched
+        if self._rta.is_moving(src):
+            return MoveResult(False, REASON_MOTION_IN_PROGRESS)  # only that piece
         if self._rta.is_airborne(src):
-            return self.REASON_AIRBORNE  # protects rule 2: a jumping piece does not move
-        if not self._validator.is_legal(src, dst):
-            return None  # illegal moves are silently ignored
+            return MoveResult(False, REASON_AIRBORNE)  # rule 2: a jumper stays put
+        validation = self._validator.validate_move(src, dst)
+        if not validation.is_valid:
+            return MoveResult(False, validation.reason)  # rule-level reason, verbatim
         piece = self._board.piece_at(*src)
         self._rta.start_motion(piece, src, dst)
-        return None
+        return ACCEPTED
 
-    def jump(self, x, y):
-        """Send the piece at (x, y) airborne. The six jump rules:
+    def request_jump(self, cell):
+        """Send the piece on `cell` airborne. The six jump rules:
         1. A jump lasts Config.jump_ms.
         2. The jumping piece stays on its logical cell -- it does not move.
         3. If an enemy arrives at the airborne cell during the window, the
@@ -62,9 +63,6 @@ class Game:
         5. A piece that is currently moving cannot jump (checked here).
         6. A captured/empty cell cannot jump (checked here).
         """
-        cell = self._pixel_to_cell(x, y)
-        if not self._board.in_bounds(*cell):
-            return  # outside the board -> ignored, mirrors click()
         if self._game_over:
             return  # board/RTA untouched once the game has ended
         piece = self._board.piece_at(*cell)
@@ -77,9 +75,38 @@ class Game:
         self._rta.start_jump(piece, cell)
 
     def wait(self, ms):
+        if self._game_over:
+            return  # the game ended: time stops, pieces still in flight never land
         self._rta.advance_time(ms)
         if self._rta.king_was_captured():
             self._game_over = True
 
-    def render(self):
-        return self._board.render()
+    def snapshot(self, selected_cell=None):
+        """-> GameSnapshot (guide S20). A read-only view for the renderer: it
+        never receives the live Board or Piece objects (guide S19).
+
+        A piece in flight is reported on its *logical* cell -- the board only
+        changes on arrival -- but with an interpolated pixel position, which is
+        what lets the renderer draw it between cells.
+        """
+        cell = self._config.cell_size
+        views = []
+        for row in range(self._board.rows):
+            for col in range(self._board.cols):
+                token = self._board.piece_at(row, col)
+                if token is None:
+                    continue
+                motion = self._rta.motion_from((row, col))
+                if motion is None:
+                    x, y, state = col * cell, row * cell, STATE_IDLE
+                else:
+                    x, y = self._rta.interpolate(motion, cell)
+                    state = STATE_MOVING
+                views.append(PieceView(
+                    kind=self._config.type_of(token),
+                    color=self._config.color_of(token),
+                    row=row, col=col, x=x, y=y, state=state))
+        return GameSnapshot(
+            board_width=self._board.cols, board_height=self._board.rows,
+            cell_size=cell, pieces=tuple(views),
+            selected_cell=selected_cell, game_over=self._game_over)
