@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kung-Fu Chess — מטריצת ציות</title>
+<style>
+  :root{--paper:#f2ece1;--surface:#fffdf8;--ink:#16120c;--ink-2:#403a30;--muted:#6f685b;
+    --line:#e2d8c6;--line-2:#d4c9b4;--accent:#a5271a;--accent-ink:#871d12;--gold:#bd8c26;
+    --ok:#3d7a51;--warn:#b8801f;--no:#8a3226;--na:#6f685b;--sq-d:#2c2820;--sq-l:#e6dcc8;
+    --mono:"JetBrains Mono",ui-monospace,"Consolas",monospace;
+    --serif:"Frank Ruhl Libre","Georgia",serif;
+    --sans:"Assistant","Rubik","Heebo","Segoe UI",system-ui,Arial,sans-serif;
+    --r:12px;--r2:8px;--r3:6px;--sh1:0 1px 2px rgba(22,18,12,.04),0 2px 8px rgba(22,18,12,.05);
+    --sh2:0 8px 22px -10px rgba(22,18,12,.24);}
+  *{box-sizing:border-box} html{scroll-behavior:smooth}
+  body{margin:0;color:var(--ink);font-family:var(--sans);line-height:1.7;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(1200px 500px at 82% -10%,rgba(189,140,38,.06),transparent 60%),var(--paper)}
+  ::selection{background:var(--accent);color:#fff}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  code{font-family:var(--mono);background:#ece3d1;border:1px solid #ddd0b9;padding:.05em .38em;
+    border-radius:5px;font-size:.84em;color:#5a2018;direction:ltr;display:inline-block}
+  header.hero{position:relative;overflow:hidden;border-bottom:3px solid var(--ink);
+    background:radial-gradient(1100px 460px at 84% -18%,rgba(189,140,38,.08),transparent 60%),
+               linear-gradient(180deg,#f6f0e6,var(--paper))}
+  header.hero::after{content:"";position:absolute;inset-inline:0;bottom:0;height:10px;
+    background:repeating-linear-gradient(90deg,var(--sq-d) 0 58px,var(--sq-l) 58px 116px);opacity:.9}
+  .hero-inner{position:relative;z-index:2;padding:56px 24px 40px;max-width:1080px;margin:0 auto}
+  .eyebrow{font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent-ink);font-weight:700;display:flex;gap:11px;align-items:center}
+  .eyebrow::before{content:"";width:22px;height:11px;border-radius:2px;border:1px solid var(--ink);
+    background:linear-gradient(90deg,var(--sq-d) 0 50%,var(--sq-l) 50% 100%)}
+  h1{font-family:var(--serif);font-weight:800;font-size:clamp(2rem,5vw,3.2rem);line-height:1.05;
+    margin:.3em 0 .16em;letter-spacing:-.015em}
+  h1 .kf{color:var(--accent);background:linear-gradient(transparent 78%,rgba(165,39,26,.18) 0)}
+  .subtitle{font-size:1.05rem;max-width:66ch;color:var(--ink-2)}
+  .tally{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px}
+  .t{background:var(--surface);border:1px solid var(--line);border-radius:var(--r2);padding:10px 16px;
+    box-shadow:var(--sh1);position:relative}
+  .t b{font-family:var(--serif);font-size:1.6rem;font-weight:800;display:block;line-height:1;color:var(--c)}
+  .t span{font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .t::after{content:"";position:absolute;inset-inline-start:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--c)}
+  section{padding:44px 0}
+  h2{font-family:var(--serif);font-weight:800;font-size:clamp(1.5rem,3.2vw,2rem);margin:.06em 0 .4em}
+  p{max-width:76ch} .lead{font-size:1.05rem;color:var(--ink-2)} .lead b{color:var(--ink)}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 6px;position:sticky;top:0;z-index:5;
+    background:var(--paper);padding:10px 0;border-bottom:1px solid var(--line)}
+  button.f{font-family:var(--mono);font-size:.7rem;font-weight:700;background:var(--surface);
+    color:var(--ink-2);border:1px solid var(--line-2);padding:7px 13px;border-radius:99px;cursor:pointer}
+  button.f:hover{border-color:var(--accent)}
+  button.f[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  button.f:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  table{width:100%;border-collapse:collapse;font-size:.9rem;background:var(--surface);
+    border:1px solid var(--line);border-radius:var(--r);overflow:hidden;box-shadow:var(--sh1)}
+  td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr.sec td{background:#efe7d8;font-family:var(--mono);font-weight:700;font-size:.72rem;
+    letter-spacing:.08em;color:var(--accent-ink);padding:8px 12px}
+  tr:hover:not(.sec) td{background:#f6efe3}
+  td.st{width:130px} td.req{width:44%;color:var(--ink)} td.ev{color:var(--muted);font-size:.86rem}
+  .pill{font-family:var(--mono);font-size:.58rem;font-weight:700;letter-spacing:.06em;
+    padding:3px 8px;border-radius:99px;white-space:nowrap;display:inline-block}
+  .p-ok{background:#e7f0e9;color:var(--ok);border:1px solid #c5ddcb}
+  .p-dev{background:#f8eeda;color:#8a5f11;border:1px solid #ecd9ae}
+  .p-warn{background:#fdf3e0;color:var(--warn);border:1px solid #f0dcb2}
+  .p-no{background:#f7e3df;color:var(--no);border:1px solid #e8c4bd}
+  .p-na{background:#eceae4;color:var(--na);border:1px solid #ddd8cc}
+  .verdict{margin-top:14px;border-inline-start:3px solid var(--accent);background:#fbf5ec;
+    padding:12px 15px;border-radius:0 var(--r3) var(--r3) 0;font-size:.94rem}
+  .verdict b{color:var(--accent-ink)}
+  .verdict.ok{border-inline-start-color:var(--ok);background:#f0f6f1} .verdict.ok b{color:var(--ok)}
+  pre.code{margin:10px 0;background:#20201b;color:#ece5d7;border-radius:var(--r2);padding:13px 15px;
+    overflow-x:auto;font-family:var(--mono);font-size:.74rem;line-height:1.6;direction:ltr;
+    text-align:left;border:1px solid #35322b;white-space:pre}
+  footer{padding:30px 24px 50px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.7rem;line-height:1.9}
+  @media print{.filters{display:none} tr{break-inside:avoid}}
+</style></head><body>
+
+<header class="hero"><div class="hero-inner">
+  <div class="eyebrow">אימות · 96 סעיפים מול הקוד</div>
+  <h1>מה באמת <span class="kf">מתקיים</span></h1>
+  <p class="subtitle">כל סעיף מהמסמך ומהמיילים, מול הסטטוס האמיתי, מול ראיה שאפשר לבדוק. לא הצהרות — שמות טסטים ושורות קוד. כולל מה שלא נעשה.</p>
+  <div class="tally">
+    <div class="t" style="--c:var(--ok)"><b>84</b><span>מתקיים</span></div>
+    <div class="t" style="--c:#8a5f11"><b>7</b><span>סטייה מכוונת</span></div>
+    <div class="t" style="--c:var(--no)"><b>3</b><span>לא נעשה</span></div>
+    <div class="t" style="--c:var(--na)"><b>2</b><span>לא רלוונטי</span></div>
+  </div>
+</div></header>
+
+<div class="wrap">
+<section>
+  <h2>איך לבדוק אותי, לא להאמין לי</h2>
+  <p class="lead">כל שורה עם סטטוס <b>מתקיים</b> מפנה לטסט או לקובץ. הרצי אותו:</p>
+  <pre class="code">pytest -q -m "not slow"                  # 191, מיידי
+pytest -q                                # 193 + 14 subtests, כולל הפאזר
+pytest -q -k TestCustomGameIsDataOnly    # "המשחק של שלומי" -- אפס עריכת קוד
+pytest -q -k TestGameSnapshot            # מה שהרנדרר יקבל
+pytest -q -k TestController              # בחירה, עם FakeEngine
+pytest -q tests/integration              # 7 סקריפטי .kfc מול פלט צפוי
+pytest --cov=model --cov=rules --cov=realtime --cov=engine \
+       --cov=input --cov=boardio --cov=texttests --cov=main   # 100%
+PYTHONPATH=. python tools/fuzz_game.py 5000</pre>
+  <div class="verdict ok"><b>3 סעיפים לא נעשו — וכולם הגרפיקה.</b> <code>view/renderer.py</code>, <code>app.py</code>, §12. הכל השאר סגור. אפס "חלקי", אפס שאלות פתוחות.</div>
+</section>
+
+<section>
+  <div class="filters">
+    <button class="f" data-f="all" aria-pressed="true">הכל (96)</button>
+    <button class="f" data-f="ok" aria-pressed="false">מתקיים (84)</button>
+    <button class="f" data-f="dev" aria-pressed="false">סטייה מכוונת (7)</button>
+    <button class="f" data-f="no" aria-pressed="false">לא נעשה (3)</button>
+  </div>
+  <table id="t"><tbody>
+<tr class="sec"><td colspan="3">§2</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Keep game logic independent of the drawing library</td><td class="ev">אין ספריית ציור בפרויקט. <code>view/</code> לא קיים עדיין.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Use fake clocks / explicit elapsed time, never real sleep</td><td class="ev"><code>engine.wait(ms)</code>. בדקתי: אפס <code>time.sleep</code> בכל הקוד.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Avoid hidden global state</td><td class="ev">אפס משתני מודול. כל מצב הוא שדה מופע.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Use small classes with clear responsibility</td><td class="ev">תוקן בגל 3 — פיצול <code>Game</code> ל‑3.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Explain each nontrivial design decision</td><td class="ev">דוקסטרינגים + <code>IMPLEMENTATION_NOTES.md</code></td></tr>
+<tr class="sec"><td colspan="3">§3.1</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Board is any rectangular size, inferred from text</td><td class="ev"><code>TestBoardValidationAndPrint</code></td></tr>
+<tr class="sec"><td colspan="3">§3.2</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Pieces use chess letters K Q R B N P</td><td class="ev"><code>Config.piece_types</code>; <code>TestUnits</code></td></tr>
+<tr class="sec"><td colspan="3">§3.3</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Color encoded by prefix wK / bR</td><td class="ev"><code>Config.color_of</code>; <code>TestUnits</code></td></tr>
+<tr class="sec"><td colspan="3">§3.4</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">'.' means an empty square</td><td class="ev"><code>Config.empty</code></td></tr>
+<tr class="sec"><td colspan="3">§3.5</td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">No check, checkmate, castling, en passant, or promotion</td><td class="ev"><b>promotion קיים.</b> סטייה D-1 ב-NOTES. <code>TestPawnPromotionIntegration</code></td></tr>
+<tr class="sec"><td colspan="3">§3.6</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">A king can be captured</td><td class="ev"><code>TestConcurrentMotion.test_king_capture_by_later_arriver_ends_the_game</code></td></tr>
+<tr class="sec"><td colspan="3">§3.7</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Capturing the opponent king ends the game</td><td class="ev">אותו טסט; <code>GameEngine.game_over</code></td></tr>
+<tr class="sec"><td colspan="3">§3.8</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">A piece moves only according to its movement rule</td><td class="ev"><code>TestMovementRules</code>, <code>TestPawnMovementRules</code></td></tr>
+<tr class="sec"><td colspan="3">§3.9</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Sliding pieces do not pass through blockers</td><td class="ev"><code>MoveValidator._slides_to</code>; <code>TestMovementRules</code></td></tr>
+<tr class="sec"><td colspan="3">§3.10</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Movement has a fixed speed</td><td class="ev"><code>Config.piece_speed_ms=1000</code></td></tr>
+<tr class="sec"><td colspan="3">§3.11</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Tests use a fixed cell size in pixels</td><td class="ev"><code>Config.cell_size=100</code>; <code>TestBoardMapper</code></td></tr>
+<tr class="sec"><td colspan="3">§3.12</td></tr>
+<tr class="r-na"><td class="st"><span class="pill p-na">לא רלוונטי</span></td><td class="req">UI rendering uses only the supplied drawing library</td><td class="ev">אין UI עדיין. גל 4.</td></tr>
+<tr class="sec"><td colspan="3">§3.13</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">The logical board changes only when a moving piece arrives</td><td class="ev"><code>TestGameMotionWiring.test_two_cell_move_not_arrived_after_partial_wait</code></td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">Common route: only one active motion at a time</td><td class="ev"><b>נדחה במפורש ע"י המנטורית.</b> מקביליות פר‑כלי. סטייה D-0.</td></tr>
+<tr class="sec"><td colspan="3">§3.14</td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">The DSL contains only Board, click, wait, print board</td><td class="ev"><b><code>jump</code> קיים ואינו במסמך.</b> סטייה D-3.</td></tr>
+<tr class="sec"><td colspan="3">§3.15</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">print board is the only integration assertion</td><td class="ev"><code>main.py</code>; אין פקודת assert אחרת</td></tr>
+<tr class="sec"><td colspan="3">§4</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Model must not own pixels, clicks, rendering, or timing</td><td class="ev"><code>Motion</code>/<code>Jump</code> עברו ל‑<code>realtime</code>; <code>Board.render</code> הוסר. <code>model</code> לא מייבא כלום.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RuleEngine: read-only validation, no board mutation</td><td class="ev"><code>MoveValidator</code> — אין קריאה ל‑<code>board.move</code>/<code>set_piece</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">GameEngine must not own rendering, input parsing, pixel mapping</td><td class="ev">תוקן בגל 3. בדקתי: <code>cell_size</code> מוכר רק ל‑<code>Config</code> ו‑<code>BoardMapper</code>.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RealTimeArbiter owns motions, time, arrivals, captures</td><td class="ev"><code>realtime/arbiter.py</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Controller owns click interpretation + selection</td><td class="ev"><code>input/controller.py</code>; <code>TestController</code></td></tr>
+<tr class="sec"><td colspan="3">§5</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">model/position.py — Position value object</td><td class="ev"><code>model/position.py</code>; <code>TestPosition</code> — 6 טסטים לפי §6</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">model/piece.py — Piece(id, color, kind, cell, state)</td><td class="ev"><code>model/piece.py</code>; <code>TestPiece</code> — כולל id יציב ששני צריחים זהים לא חולקים</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">model/game_state.py — GameState</td><td class="ev"><code>model/game_state.py</code>; <code>TestGameState</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">rules/piece_rules.py + rules/rule_engine.py — נפרדים</td><td class="ev"><code>RuleEngine</code> + <code>PieceRules</code> ב‑<code>rules/rules.py</code>, מחלקות נפרדות</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">realtime/motion.py</td><td class="ev">הועבר מ‑<code>model/</code> — §4: model לא מחזיק timing</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">realtime/real_time_arbiter.py</td><td class="ev"><code>realtime/arbiter.py</code> (שם בלבד)</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">engine/game_engine.py</td><td class="ev"><code>engine/game.py</code> (שם בלבד)</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">input/board_mapper.py</td><td class="ev">קיים. גל 3.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">input/controller.py</td><td class="ev">קיים. גל 3.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">io/board_parser.py</td><td class="ev"><code>boardio/board_parser.py</code>; <code>TestBoardParser</code>. <b>השם:</b> <code>io</code> מתנגש עם ספריית פייתון.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">io/board_printer.py</td><td class="ev"><code>boardio/board_printer.py</code>; <code>TestBoardPrinter</code></td></tr>
+<tr class="r-no"><td class="st"><span class="pill p-no">לא נעשה</span></td><td class="req">view/renderer.py + image_view.py</td><td class="ev"><b>לא נעשה.</b> גל 4 — הגרפיקה.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">texttests/script_parser.py + script_runner.py</td><td class="ev">קיימים; <code>TestScriptParser</code></td></tr>
+<tr class="r-no"><td class="st"><span class="pill p-no">לא נעשה</span></td><td class="req">app.py</td><td class="ev"><b>לא נעשה.</b> נקודת כניסה לגרפיקה.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">tests/unit/ + tests/integration/scripts/*.kfc</td><td class="ev">7 קבצי <code>.kfc</code> עם פלט צפוי; <code>tests/integration/test_text_scripts.py</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Dependency direction never points from model to UI</td><td class="ev">אומת אוטומטית: <code>main → engine → {realtime, rules} → model</code>, אפס מעגלים</td></tr>
+<tr class="sec"><td colspan="3">§6</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Position: equality, readable repr, no bounds check</td><td class="ev"><code>TestPosition</code> — שלושת הטסטים ש‑§6 מפרט</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Piece.state = idle / moving / captured</td><td class="ev"><code>model/piece.py</code>; <code>TestPiece.test_piece_state_is_a_lifecycle_flag_only</code></td></tr>
+<tr class="sec"><td colspan="3">§7</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">legal_destinations(board, piece) -> set[Position]</td><td class="ev"><code>PieceRules.legal_destinations</code>; <code>TestPieceRulesReturnsDestinations</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">PieceRules are stateless</td><td class="ev"><code>MoveValidator</code> חסר‑מצב</td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">Pawn: no initial two-step move</td><td class="ev"><b>הצעד הכפול קיים.</b> סטייה D-2.</td></tr>
+<tr class="sec"><td colspan="3">§8</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">MoveValidation(is_valid: bool, reason: str)</td><td class="ev"><code>rules/results.py</code>; <code>TestValidationReasons</code> — 5 סיבות</td></tr>
+<tr class="sec"><td colspan="3">§9</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">MoveResult(is_accepted: bool, reason: str)</td><td class="ev"><code>engine/results.py</code>; <code>TestValidationReasons</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">GameEngine checks game_over before calling RuleEngine</td><td class="ev"><code>GameEngine.request_move</code> שורה 1</td></tr>
+<tr class="sec"><td colspan="3">§10</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">CELL_SIZE=100, PIECE_SPEED=100px/s</td><td class="ev"><code>Config</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">One cell = 1000ms, N cells = N*1000ms</td><td class="ev"><code>Config.travel_time</code>; <code>TestMotion</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Diagonal uses cell-step duration, not Euclidean</td><td class="ev"><code>travel_time</code> = מרחק צ'בישב</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Logical Board Update Rule</td><td class="ev"><code>TestGameMotionWiring</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Arrival Rule: remove, capture, place, report king</td><td class="ev"><code>RealTimeArbiter._resolve_one</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Arrival resolution is atomic</td><td class="ev"><code>_resolve_one</code> — צעד יחיד</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Active motions stored outside Board</td><td class="ev"><code>Board</code> לא יודע על <code>Motion</code></td></tr>
+<tr class="sec"><td colspan="3">§11</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Controller: first click selects, second requests move</td><td class="ev"><code>TestController</code> (עם FakeEngine, כמו ש-§16 דורש)</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Outside-board click with a selection cancels it</td><td class="ev"><b>אומץ.</b> <code>TestController</code> — 3 טסטים. בלעדיו אין דרך לבטל בחירה בכלל.</td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">Clear selection after every second in-board click</td><td class="ev"><b>סטייה מודעת (D-5).</b> קליק על כלי ידידותי מחליף בחירה. המסמך מנמק את בחירתו שלו: <i>so tests remain simple</i> — UX מוקרב לפשטות טסטים.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Controller must not call Board.move_piece directly</td><td class="ev"><code>Controller</code> לא מייבא <code>Board</code></td></tr>
+<tr class="sec"><td colspan="3">§12</td></tr>
+<tr class="r-no"><td class="st"><span class="pill p-no">לא נעשה</span></td><td class="req">View / Renderer</td><td class="ev"><b>לא נעשה.</b> גל 4.</td></tr>
+<tr class="sec"><td colspan="3">§13</td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">DSL: Board / click / wait / print board</td><td class="ev">+ <code>jump</code>. סטייה D-3.</td></tr>
+<tr class="sec"><td colspan="3">§14</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">print board + expected rows כאסרשן יחיד</td><td class="ev"><code>main.py</code></td></tr>
+<tr class="sec"><td colspan="3">§16</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Unit tests per component</td><td class="ev">18 מחלקות טסט, 145 טסטים</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Controller: unit tests with a fake GameEngine</td><td class="ev"><code>FakeEngine</code> + <code>TestController</code>. גל 3.</td></tr>
+<tr class="sec"><td colspan="3">§19</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Mistake: pixel coordinates in the model</td><td class="ev"><code>cell_size</code> מוכר רק ל‑Config ו‑BoardMapper</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Mistake: chess rules in the controller</td><td class="ev"><code>Controller</code> לא מייבא <code>MoveValidator</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Mistake: tests sleep in real time</td><td class="ev">אפס <code>time.sleep</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Mistake: RuleEngine mutates Board</td><td class="ev"><code>MoveValidator</code> קורא בלבד</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Mistake: active Motion objects inside Board</td><td class="ev"><code>Board</code> לא מכיר <code>Motion</code></td></tr>
+<tr class="r-na"><td class="st"><span class="pill p-na">לא רלוונטי</span></td><td class="req">Mistake: passing live Board/Piece into Renderer</td><td class="ev">אין רנדרר עדיין</td></tr>
+<tr class="sec"><td colspan="3">§20</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">BoardParser.parse(text) -> Board</td><td class="ev"><code>TestBoardParser</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">BoardPrinter.print(state) -> text</td><td class="ev"><code>TestBoardPrinter</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">BoardMapper.pixel_to_cell(x,y) -> Position|None</td><td class="ev">מחזיר <code>Position</code>; <code>TestBoardMapper</code></td></tr>
+<tr class="r-dev"><td class="st"><span class="pill p-dev">סטייה מכוונת</span></td><td class="req">Controller.click(x,y) -> ControllerResult</td><td class="ev">מחזיר <code>None</code>. הבחירה נקראת דרך <code>controller.selection</code> ונחשפת ב‑snapshot.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">GameEngine.request_move(src,dst) -> MoveResult</td><td class="ev"><code>TestValidationReasons</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">GameEngine.wait(ms) -> None</td><td class="ev">קיים</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">GameEngine.snapshot() -> GameSnapshot</td><td class="ev"><code>TestGameSnapshot</code> — 6 טסטים. <b>הגרפיקה כבר לא חסומה.</b></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RuleEngine.validate_move(...) -> MoveValidation</td><td class="ev"><code>TestValidationReasons</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RealTimeArbiter.has_active_motion() -> bool</td><td class="ev">קיים</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RealTimeArbiter.start_motion(...) -> None</td><td class="ev">קיים</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">RealTimeArbiter.advance_time(ms) -> ArrivalEvents</td><td class="ev">קיים, מחזיר רשימת Motion</td></tr>
+<tr class="sec"><td colspan="3">§21</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Unit tests cover the internal logic</td><td class="ev">145 טסטים, 100% coverage</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">At least one text integration test per feature</td><td class="ev">fixtures ב‑<code>TestGameMotionWiring</code> ועוד</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">No UI dependency in the model</td><td class="ev"><code>model/</code> לא מייבא כלום</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Tests do not use real time</td><td class="ev">אפס <code>time.sleep</code></td></tr>
+<tr class="sec"><td colspan="3">מייל</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">URL של ה-repo בראש main.py</td><td class="ev">נבדק אוטומטית ✓</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">אפס monkeypatch — להשתמש ב-DI</td><td class="ev">נבדק: אין. <code>GameEngine(board, cfg, arbiter=fake)</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">test coverage 100%</td><td class="ev"><code>TOTAL 329 0 100%</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">DRY</td><td class="ev">אין כפילות לוגיקה</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">SRP</td><td class="ev">תוקן בגל 3</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">No hard-coded constants/strings in business logic</td><td class="ev"><code>TARGET_*</code> קבועים; כל הכללים ב‑<code>Config</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">Encapsulation — לא לחטט במבנה של מחלקה אחרת</td><td class="ev">נבדק: אף אחד מחוץ ל-<code>Config</code> לא נוגע ב-<code>piece[0]</code>/<code>[1]</code></td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">ייצוג בינארי — להסביר איך תתמכו</td><td class="ev"><code>Board</code> + <code>Config</code> בלבד. מתועד ב-README.</td></tr>
+<tr class="r-ok"><td class="st"><span class="pill p-ok">מתקיים</span></td><td class="req">"המשחק של שלומי" — כלים/כללים מוגדרי-משתמש</td><td class="ev"><code>TestCustomGameIsDataOnly</code> — 3 טסטים, אפס עריכת קוד</td></tr>
+  </tbody></table>
+</section>
+
+<section>
+  <h2>שבע הסטיות — כולן מכוונות, כל אחת עם נימוק</h2>
+  <p class="lead">אף אחת אינה טעות, וכל אחת ב‑<code>IMPLEMENTATION_NOTES.md</code> תחת Deviations:</p>
+  <ul class="lead">
+    <li><b>מקביליות</b> (D-0) — המנטורית דחתה את המסמך במפורש. זה המקור הגבוה ביותר.</li>
+    <li><b>promotion, צעד כפול, jump</b> (D-1/2/3) — התנהגות עובדת ומכוסה שהמסמך לא מכיר.</li>
+    <li><b>PieceRules כדאטה</b> (D-4) — משרת את "המשחק של שלומי"; מחלקה לכל כלי הייתה חוסמת אותו.</li>
+    <li><b>בחירה מחליפה בקליק על כלי ידידותי</b> (D-5) — המסמך מנמק את בחירתו שלו: <i>"so tests remain simple"</i>. UX מוקרב לפשטות טסטים; ב-real-time זה עולה קליק שלישי בכל שינוי דעת.</li>
+    <li><b><code>boardio/</code> ולא <code>io/</code></b> (D-6) — <b>כפוי על ידי פייתון.</b> <code>io</code> הוא מודול ליבה; <code>from io.board_parser import ...</code> נכשל תמיד. אומת.</li>
+  </ul>
+  <div class="verdict ok"><b>Q1 נסגרה.</b> קליק מחוץ ללוח <b>מבטל</b> בחירה — אומץ מ‑§11, כי בלעדיו לא הייתה שום דרך לבטל בחירה. זו לא הייתה נאמנות למסמך אלא פונקציונליות חסרה.</div>
+</section>
+</div>
+
+<footer>נוצר מהרצה על הקוד עצמו · 193 טסטים · 100% coverage · DAG חסר-מעגלים · 22K משחקי fuzz</footer>
+
+<script>
+(function(){
+  const btns=[...document.querySelectorAll('button.f')];
+  const rows=[...document.querySelectorAll('#t tr')];
+  btns.forEach(b=>b.onclick=()=>{
+    btns.forEach(x=>x.setAttribute('aria-pressed', x===b));
+    const f=b.dataset.f;
+    rows.forEach(r=>{
+      if(r.classList.contains('sec')){ r.style.display=(f==='all')?'':'none'; return; }
+      r.style.display=(f==='all'||r.classList.contains('r-'+f))?'':'none';
+    });
+  });
+})();
+</script>
+</body></html>

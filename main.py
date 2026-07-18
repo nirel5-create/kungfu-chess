@@ -1,64 +1,22 @@
-# ============================================================================
-#  Kung-Fu Chess
-#  Repo:    https://github.com/nirel5-create/kungfu-chess
-#  Report:  https://nirel5-create.github.io/kungfu-chess/kungfu_chess_report.html
-#           (interactive, rendered architecture report)
-# ============================================================================
+# Repo:   https://github.com/nirel5-create/kungfu-chess
+# Report: https://nirel5-create.github.io/kungfu-chess/ARCHITECTURE_REPORT.html
+#         (interactive, rendered architecture report)
+"""Entry point for the text protocol. Reads a script on stdin, writes the
+board on stdout. It composes the objects and hands over -- it holds no game
+logic, no text format, and no command meanings of its own."""
 import sys
 
 from model.config import Config
-from model.board import Board
-from engine.game import Game
+from texttests.script_runner import ScriptRunner
 
-# Protocol output strings (single source of truth, never inline magic strings).
-ERROR_ROW_WIDTH = "ERROR ROW_WIDTH_MISMATCH"
-ERROR_UNKNOWN_TOKEN = "ERROR UNKNOWN_TOKEN"
+# Re-exported for callers that already import them from here.
+from texttests.script_runner import ERROR_ROW_WIDTH, ERROR_UNKNOWN_TOKEN
 
-
-def parse_sections(lines):
-    lines = [line.strip() for line in lines]
-    board_start = lines.index("Board:") + 1
-    commands_start = lines.index("Commands:")
-    grid = [line.split() for line in lines[board_start:commands_start] if line]
-    commands = [line for line in lines[commands_start + 1:] if line]
-    return grid, commands
-
-
-def validate_board(grid, config):
-    widths = {len(row) for row in grid}
-    if len(widths) > 1:
-        return ERROR_ROW_WIDTH
-    for row in grid:
-        for token in row:
-            if not config.is_valid_token(token):
-                return ERROR_UNKNOWN_TOKEN
-    return None
-
-
-def dispatch(game, command, out):
-    parts = command.split()
-    if command == "print board":
-        print(game.render(), file=out)
-    elif parts[0] == "click" and len(parts) == 3:
-        game.click(int(parts[1]), int(parts[2]))
-    elif parts[0] == "wait" and len(parts) == 2:
-        game.wait(int(parts[1]))
-    elif parts[0] == "jump" and len(parts) == 3:
-        game.jump(int(parts[1]), int(parts[2]))
-    # anything else -> ignored
+__all__ = ["run", "ERROR_ROW_WIDTH", "ERROR_UNKNOWN_TOKEN"]
 
 
 def run(inp, out):
-    lines = inp.read().splitlines()
-    grid, commands = parse_sections(lines)
-    config = Config()
-    error = validate_board(grid, config)
-    if error:
-        print(error, file=out)
-        return
-    game = Game(Board(grid, config), config)
-    for command in commands:
-        dispatch(game, command, out)
+    ScriptRunner(Config(), out).run(inp.read())
 
 
 if __name__ == "__main__":

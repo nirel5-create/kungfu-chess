@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kung-Fu Chess — תוכנית יישום והטמעה</title>
+<style>
+  :root{
+    --paper:#f2ece1; --surface:#fffdf8;
+    --ink:#16120c; --ink-2:#403a30; --muted:#6f685b;
+    --line:#e2d8c6; --line-2:#d4c9b4;
+    --accent:#a5271a; --accent-ink:#871d12; --accent-soft:#eacca6;
+    --gold:#bd8c26; --ok:#3d7a51; --warn:#b8801f;
+    --sq-d:#2c2820; --sq-l:#e6dcc8;
+    --mono:"JetBrains Mono","SFMono-Regular",ui-monospace,"Menlo","Consolas",monospace;
+    --serif:"Frank Ruhl Libre","Iowan Old Style","Palatino Linotype","Georgia",serif;
+    --sans:"Assistant","Rubik","Heebo","Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+    --r:12px; --r2:8px; --r3:6px;
+    --sh1:0 1px 2px rgba(22,18,12,.04),0 2px 8px rgba(22,18,12,.05);
+    --sh2:0 8px 22px -10px rgba(22,18,12,.24);
+    --sh3:0 26px 54px -24px rgba(22,18,12,.38);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0;color:var(--ink);font-family:var(--sans);line-height:1.72;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(1200px 500px at 82% -10%,rgba(189,140,38,.06),transparent 60%),
+               radial-gradient(900px 480px at 8% 4%,rgba(165,39,26,.05),transparent 55%),var(--paper);}
+  ::selection{background:var(--accent);color:#fff;}
+  .wrap{max-width:1020px;margin:0 auto;padding:0 24px;}
+  code{font-family:var(--mono);background:#ece3d1;border:1px solid #ddd0b9;padding:.06em .4em;border-radius:5px;font-size:.86em;color:#5a2018;direction:ltr;display:inline-block;}
+
+  .eyebrow::before,.sec-label::before{content:"";width:22px;height:11px;flex:none;border-radius:2px;border:1px solid var(--ink);
+    background:linear-gradient(90deg,var(--sq-d) 0 50%,var(--sq-l) 50% 100%);display:inline-block;}
+
+  header.hero{position:relative;overflow:hidden;border-bottom:3px solid var(--ink);
+    background:radial-gradient(1100px 460px at 84% -18%,rgba(189,140,38,.08),transparent 60%),
+               linear-gradient(180deg,#f6f0e6,var(--paper));}
+  header.hero::after{content:"";position:absolute;inset-inline:0;bottom:0;height:10px;
+    background:repeating-linear-gradient(90deg,var(--sq-d) 0 58px,var(--sq-l) 58px 116px);opacity:.9;}
+  .hero-inner{position:relative;z-index:2;padding:64px 24px 44px;max-width:1020px;margin:0 auto;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;display:flex;gap:11px;align-items:center;}
+  h1{font-family:var(--serif);font-weight:800;font-size:clamp(2.2rem,5.4vw,3.5rem);line-height:1.05;margin:.3em 0 .16em;letter-spacing:-.015em;}
+  h1 .kf{color:var(--accent);background:linear-gradient(transparent 78%,rgba(165,39,26,.18) 0);}
+  .subtitle{font-size:1.08rem;max-width:62ch;color:var(--ink-2);}
+  .stat-row{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px;}
+  .stat{position:relative;background:linear-gradient(180deg,#211c15,var(--ink));color:var(--paper);border-radius:var(--r2);
+    padding:12px 18px 10px;box-shadow:var(--sh2);}
+  .stat b{font-family:var(--serif);font-size:1.4rem;font-weight:800;display:block;line-height:1.1;color:#fff;}
+  .stat span{font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;opacity:.72;}
+  .stat::after{content:"";position:absolute;inset-inline-start:0;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--accent);}
+
+  section{padding:52px 0;position:relative;}
+  section+section::before{content:"";position:absolute;top:0;inset-inline:24px;height:1px;
+    background:repeating-linear-gradient(90deg,var(--line-2) 0 10px,transparent 10px 20px);}
+  .sec-label{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent-ink);font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:11px;}
+  h2{font-family:var(--serif);font-weight:800;font-size:clamp(1.6rem,3.4vw,2.2rem);margin:.06em 0 .5em;letter-spacing:-.015em;line-height:1.14;}
+  h3{font-family:var(--serif);font-weight:700;font-size:1.2rem;margin:1.4em 0 .3em;}
+  p{max-width:74ch;}
+  .lead{font-size:1.1rem;color:var(--ink-2);} .lead b{color:var(--ink);}
+
+  /* decisions */
+  .dec{border-radius:var(--r);border:1px solid var(--line);overflow:hidden;background:var(--surface);box-shadow:var(--sh1);margin:14px 0;transition:box-shadow .2s,border-color .2s;}
+  .dec.open{box-shadow:var(--sh2);border-color:var(--line-2);}
+  .dec-head{display:flex;align-items:center;gap:13px;padding:15px 18px;cursor:pointer;user-select:none;transition:background .15s;}
+  .dec-head:hover{background:#f6efe3;}
+  .dec-head:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+  .dnum{font-family:var(--mono);font-weight:700;font-size:.7rem;background:var(--ink);color:var(--paper);border-radius:5px;padding:3px 8px;flex:none;}
+  .dtitle{font-family:var(--serif);font-weight:700;font-size:1.1rem;line-height:1.3;}
+  .dtag{margin-inline-start:auto;font-family:var(--mono);font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;font-weight:700;padding:4px 9px;border-radius:99px;flex:none;}
+  .t-conflict{background:#f7e3df;color:var(--accent-ink);border:1px solid #e8c4bd;}
+  .t-deviate{background:#f8eeda;color:#8a5f11;border:1px solid #ecd9ae;}
+  .t-struct{background:#e4eef0;color:#2f6f7d;border:1px solid #c6dee2;}
+  .caret{transition:transform .22s;color:var(--accent);font-weight:700;font-size:1.05rem;line-height:1;flex:none;}
+  .dec.open .caret{transform:rotate(-90deg);}
+  .dec-body{display:none;padding:4px 18px 18px;border-top:1px dashed var(--line-2);}
+  .dec.open .dec-body{display:block;animation:reveal .3s ease both;}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:12px 0;font-size:.94rem;align-items:start;}
+  .kv dt{font-family:var(--mono);font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;padding-top:.45em;white-space:nowrap;}
+  .kv dd{margin:0;color:var(--ink-2);}
+  .kv dd b{color:var(--ink);}
+
+  .verdict{margin-top:12px;border-inline-start:3px solid var(--accent);background:#fbf5ec;padding:11px 15px;border-radius:0 var(--r3) var(--r3) 0;font-size:.95rem;}
+  .verdict b{color:var(--accent-ink);}
+  .verdict.ok{border-inline-start-color:var(--ok);background:#f0f6f1;} .verdict.ok b{color:var(--ok);}
+  .verdict.warn{border-inline-start-color:var(--warn);background:#fdf6e7;} .verdict.warn b{color:#8a5f11;}
+
+  .quote{font-size:.9rem;color:var(--muted);border-inline-start:2px solid var(--line-2);padding:2px 12px;margin:8px 0;font-style:italic;}
+
+  pre.code{margin:10px 0;background:linear-gradient(180deg,#20201b,#191813);color:#ece5d7;border-radius:var(--r2);padding:14px 16px;overflow-x:auto;
+    font-family:var(--mono);font-size:.78rem;line-height:1.6;direction:ltr;text-align:left;border:1px solid #35322b;box-shadow:inset 0 1px 0 rgba(255,255,255,.05);white-space:pre;}
+  pre.code::-webkit-scrollbar{height:9px;}
+  pre.code::-webkit-scrollbar-thumb{background:#4a463d;border-radius:9px;}
+
+  /* waves */
+  .wave{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;margin:14px 0;box-shadow:var(--sh1);}
+  .wave h4{font-family:var(--serif);font-size:1.12rem;margin:0 0 .2em;display:flex;align-items:center;gap:10px;}
+  .wnum{font-family:var(--mono);font-size:.62rem;background:var(--accent);color:#fff;border-radius:5px;padding:3px 8px;font-weight:700;}
+  .wave .goal{font-size:.92rem;color:var(--muted);margin:0 0 10px;}
+  .wave ul{margin:6px 0;padding-inline-start:20px;font-size:.94rem;color:var(--ink-2);}
+  .wave li{margin:3px 0;}
+  .gate{margin-top:10px;font-family:var(--mono);font-size:.72rem;color:var(--ok);font-weight:700;letter-spacing:.03em;}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:.9rem;}
+  th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-family:var(--mono);font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line-2);}
+  tr:hover td{background:#f6efe3;}
+
+  .chips{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px;}
+  .chip{background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:.72rem;padding:7px 12px;border-radius:var(--r3);box-shadow:var(--sh1);}
+  .chip b{color:var(--accent-soft);}
+
+  footer{padding:34px 24px 54px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:.72rem;letter-spacing:.05em;line-height:1.9;}
+  @keyframes reveal{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
+  @media (max-width:560px){.wrap{padding:0 18px;} .dtag{display:none;} .kv{grid-template-columns:1fr;}}
+  @media print{.dec-body{display:block!important;} body{background:#fff;}}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">תוכנית יישום והטמעה · לפי Design Guide</div>
+    <h1>חסימה <span class="kf">פר‑כלי</span><br>תנועות מקבילות</h1>
+    <p class="subtitle">מעבר מחסימה גלובלית לחסימה פר‑כלי, כך שכמה כלים נעים בו‑זמנית — כמו במשחק המקורי.</p>
+    <div class="stat-row">
+      <div class="stat"><b>116</b><span>tests green</span></div>
+      <div class="stat"><b>100%</b><span>coverage</span></div>
+      <div class="stat"><b>פר‑כלי</b><span>motion model</span></div>
+      <div class="stat"><b>2</b><span>files to change</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section>
+  <div class="sec-label">ההכרעה</div>
+  <h2>מקביליות היא הליבה, לא תוספת</h2>
+  <p class="lead">המנטורית קבעה: החסימה חלה <b>רק על הכלי שנמצא בתנועה</b>. שאר הכלים — של שני הצדדים — זזים במקביל. בלי זה המשחק מאבד חלק מהותי מההתנהלות שלו.</p>
+  <p class="lead">מסמך התכנון מתאר common route של תנועה‑אחת (§3.13, §10) ומסווג מקביליות כ‑Extra Route. <b>המנטורית מעל המסמך</b> — היא המקור הגבוה ביותר כרגע. הסיווג הזה נדחה.</p>
+  <div class="verdict"><b>מה שנשאר מוחלט:</b> אי אפשר לצוות על כלי שכבר בתנועה. <b>מה שיורד:</b> חסימת שאר הלוח, ו‑VPL כשער.</div>
+</section>
+
+<section>
+  <div class="sec-label">החלטות</div>
+  <h2>שמונה החלטות</h2>
+  <p class="lead">הראשונה הוכרעה. השאר פתוחות — סדר יורד לפי משמעות.</p>
+
+  <div class="dec open">
+    <div class="dec-head" tabindex="0"><span class="dnum">01</span><span class="dtitle">מקביליות פר‑כלי — הכרעה, לא אופציה</span><span class="dtag t-conflict">הוכרע</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>המצב</dt><dd><code>Game._request_move</code> בודק <code>has_active_motion()</code> — חסימה <b>גלובלית</b>: כלי אחד זז ⇐ אף כלי לא זז.</dd>
+        <dt>היעד</dt><dd>חסימה <b>רק על הכלי הנע</b>. כל שאר הכלים — של שני הצדדים — חופשיים לזוז במקביל.</dd>
+        <dt>מקור</dt><dd><b>המנטורית.</b> זה המקור הגבוה ביותר. המסמך (§3.13, §10) מתאר common route של תנועה‑אחת — הוא נדחה כאן.</dd>
+        <dt>למה</dt><dd>בלי מקביליות המשחק מאבד חלק מהותי מההתנהלות שלו. זו לא החמרה ארכיטקטונית — זו הליבה.</dd>
+      </dl>
+      <pre class="code"># engine/game.py — one guard, per piece. No policy flag, no common-route branch.
+if self._rta.is_moving(source):
+    return MoveResult(False, REASON_MOTION_IN_PROGRESS)   # the only motion block</pre>
+      <div class="verdict ok"><b>מה נשאר:</b> הדרישה היחידה שנשארת מוחלטת — אי אפשר לצוות על כלי <b>שכבר בתנועה</b>. זה נשמר. <b>מה יורד:</b> חסימת שאר הלוח.</div>
+      <div class="verdict warn"><b>VPL:</b> ירד ממעמד של שער. לא בודקים אותו בגלים. אם וכאשר הכול מושלם לפי כל הקריטריונים — אז אולי. הוא לא מכתיב את המודל.</div>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">02</span><span class="dtitle">לא מוחקים promotion, צעד‑כפול, ו‑jump — למרות שההוראות לא מכירות אותם</span><span class="dtag t-deviate">סטייה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§3.5 "does not implement … or promotion". §7 "Pawn has no initial two-step move. Pawn has no promotion." §13: ה‑DSL מכיל <b>בדיוק ארבע</b> פקודות — <code>Board</code>, <code>click</code>, <code>wait</code>, <code>print board</code>. <code>jump</code> לא קיים במסמך בכלל.</dd>
+        <dt>הקוד</dt><dd>יש <code>promotion_target</code>, <code>promotion_row</code>, <code>start_row</code> (צעד כפול), ו‑<code>Game.jump</code> עם שישה כללים מתועדים.</dd>
+      </dl>
+      <div class="verdict ok"><b>ההחלטה: לשמור על כולם.</b> VPL נותן 100/100 <b>עם</b> הפיצ'רים האלה. למחוק התנהגות שהבודק החי מקבל — זו הפעולה המסוכנת, לא ההפך. VPL הוא ground truth מעל המסמך. שלושתם מתועדים כ‑<b>סטיות מכוונות</b> ב‑IMPLEMENTATION_NOTES.</div>
+      <p style="font-size:.92rem;color:var(--muted)">הערה: <code>jump</code> יושב נקי ב‑<code>realtime</code> ולא מפר אף גבול שכבה — אז הוא לא "חוב", הוא תוספת מבודדת.</p>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">03</span><span class="dtitle">PieceRules: לשמור דאטה, לחשוף את ה‑interface של ההוראות</span><span class="dtag t-deviate">סטייה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§7: <code>legal_destinations(board, piece) -&gt; set[Position]</code> — מחלקת כלל קטנה לכל סוג כלי. §6: "PieceRules — Strategy per piece type".</dd>
+        <dt>הקוד</dt><dd>טבלת קרניים ב‑<code>Config</code> + מפרש גנרי אחד. אפס <code>if piece == "R"</code>.</dd>
+      </dl>
+      <div class="verdict"><b>ההחלטה: לשמור את הדאטה, לעטוף בממשק של המסמך.</b> אסטרטגיה <i>מפורמטרת</i> היא עדיין Strategy. וזה בדיוק מה שמשרת את הדרישה העתידית שהמנטורית הדגישה במייל — "משתמשים יגדירו משחקים בעצמם, שחמט קונג‑פו בסגנון שלומי". מחלקה ידנית לכל כלי <b>חוסמת</b> את זה; דאטה מאפשרת. כבר הוכחנו אמפירית: כלי חדש נוסף דרך <code>Config</code> בלבד, 6/6 בדיקות, אפס עריכה במנוע.</div>
+      <pre class="code"># rules/piece_rules.py — the guide's shape, over your data
+class PieceRules:
+    def legal_destinations(self, board, piece) -> set[Position]:
+        rays = self._config.movement.get(piece.kind)
+        ...   # existing generic interpreter, unchanged</pre>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">04</span><span class="dtitle">לפצל Controller ו‑BoardMapper מתוך Game</span><span class="dtag t-struct">מבנה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>הבעיה</dt><dd><code>Game</code> היום הוא <b>שלושה דברים</b>: מיפוי פיקסלים (<code>_pixel_to_cell</code>), מצב בחירה (<code>_selection</code>), ותיאום אפליקטיבי. ההוראות מפרידות אותם לשלוש שכבות.</dd>
+        <dt>ההוראות</dt><dd>§4 טבלת בעלות: GameEngine <b>must not own</b> "input parsing … or pixel mapping". §19: "Mistake: Putting Pixel Coordinates in the Model". §11: Controller מחזיק selection.</dd>
+      </dl>
+      <table>
+        <tr><th>יוצא מ‑Game</th><th>לאן</th><th>אחריות</th></tr>
+        <tr><td><code>_pixel_to_cell</code></td><td><code>input/board_mapper.py</code></td><td>Coordinate Adapter — <code>pixel_to_cell(x,y) -&gt; Position|None</code></td></tr>
+        <tr><td><code>_selection</code> + <code>click</code></td><td><code>input/controller.py</code></td><td>קליק ראשון בוחר, שני שולח <code>request_move</code></td></tr>
+        <tr><td>השאר</td><td><code>engine/game_engine.py</code></td><td>שומרי‑סף, האצלה, snapshot</td></tr>
+      </table>
+      <div class="verdict warn"><b>שים לב לפער התנהגותי:</b> ההוראות (§11) אומרות "Clear selection after every second in-board click" ו‑"If a piece is selected, an outside-board click cancels the selection". הקוד שלך <b>מחליף בחירה</b> כשלוחצים על כלי מאותו צבע, ו<b>מתעלם</b> מקליק חוץ‑לוח בלי לנקות בחירה. זו סטייה אמיתית — אבל VPL ירוק. <b>שמרני: לא נוגעים, מתעדים.</b></div>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">05</span><span class="dtitle">Position ו‑Piece כ‑value objects</span><span class="dtag t-struct">מבנה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§6: <code>Position(row:int, col:int)</code> — value object, שוויון, ייצוג קריא, בלי בדיקת גבולות. <code>Piece(id, color, kind, cell, state)</code> — <code>state: idle/moving/captured</code>.</dd>
+        <dt>הקוד</dt><dd>tuples <code>(row, col)</code> ומחרוזות <code>"wR"</code>. <code>piece[0]</code>/<code>piece[1]</code> פזורים ב‑Config/Arbiter.</dd>
+        <dt>העלות</dt><dd><b>גבוהה.</b> נוגע כמעט בכל קובץ ובכל טסט. זה הפריט הכי יקר ברשימה.</dd>
+        <dt>הרווח</dt><dd>סוגר את ה‑Encapsulation שהמייל הדגיש, ומכין ל‑<b>ייצוג בינארי</b> (מייל #1) — כי אז אף אחד לא נוגע ב‑<code>piece[0]</code>.</dd>
+      </dl>
+      <div class="verdict warn"><b>ההצעה: לדחות לגל אחרון, אחרי שהמשחק עובד.</b> יש דדליין ליום ראשון. זה refactor רוחבי שמסכן 116 טסטים ירוקים בשביל רווח ארכיטקטוני, לא פונקציונלי. אם הזמן נגמר — <code>Piece</code> לבד (בלי <code>Position</code>) נותן 80% מהרווח בשליש מהסיכון.</div>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">06</span><span class="dtitle">MoveResult / MoveValidation / GameSnapshot</span><span class="dtag t-struct">מבנה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§8: <code>MoveValidation(is_valid: bool, reason: str)</code> — reason תמיד קיים, <code>"ok"</code> אם תקין. §9: <code>MoveResult(is_accepted: bool, reason: str)</code>. §12: <code>GameSnapshot</code> — read-only DTO.</dd>
+        <dt>הקוד</dt><dd><code>is_legal()</code> מחזיר <code>bool</code> ערום. <code>_request_move</code> מחזיר מחרוזת או <code>None</code>. אין snapshot.</dd>
+      </dl>
+      <div class="verdict"><b>ההחלטה: לעשות.</b> זה זול, וזה סוגר את נקודת‑השיקול שזיהינו ב‑review — הקודים שמחושבים ונזרקים הופכים לערך מוחזר אמיתי שהקונטרולר צורך. <code>GameSnapshot</code> הוא ממילא חובה לגרפיקה.</div>
+      <pre class="code"># model/snapshot.py  — graphics depends on model, never on engine
+GameSnapshot = namedtuple("GameSnapshot",
+    "board_width board_height pieces selected_cell game_over")
+# pieces: kind / color / pixel position / state  (§12)</pre>
+      <p style="font-size:.92rem;color:var(--muted)">קריטי לאנימציה: ה‑snapshot חייב לשאת <b>מיקום מְחוֹשָב בפיקסלים</b> לכלי בתנועה — §12 "Draw moving pieces between cells", §10 "the renderer draws interpolated piece positions from snapshots". אחרת אין החלקה, רק קפיצה.</p>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">07</span><span class="dtitle">BoardParser / BoardPrinter החוצה מ‑main.py</span><span class="dtag t-struct">מבנה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§5: חבילת <code>io/</code> עם <code>board_parser.py</code> + <code>board_printer.py</code>. §19: "Mistake: Hiding BoardParser inside texttests — they are shared text I/O adapters".</dd>
+        <dt>הקוד</dt><dd>הפרסינג ב‑<code>main.parse_sections</code>/<code>validate_board</code>; ההדפסה ב‑<code>Board.render()</code>.</dd>
+      </dl>
+      <div class="verdict"><b>ההחלטה: לעשות.</b> זול, מבודד, ומשחרר את <code>main.py</code> להיות רק entry point. <code>Board</code> מפסיק לדעת איך הוא נראה כטקסט — וזה בדיוק מה שמכין ל<b>ייצוג בינארי</b> (מייל #1): מחליפים BoardPrinter, לא נוגעים ב‑Board.</div>
+    </div>
+  </div>
+
+  <div class="dec">
+    <div class="dec-head" tabindex="0"><span class="dnum">08</span><span class="dtitle">סדר: Extra Route לפני או אחרי הגרפיקה?</span><span class="dtag t-conflict">סתירה</span><span class="caret">‹</span></div>
+    <div class="dec-body">
+      <dl class="kv">
+        <dt>ההוראות</dt><dd>§17 Iteration 10: "Add one extra feature <b>only after</b> the common route is complete and <b>the minimal UI works</b>." כלומר: Iteration 9 = UI, ואז Iteration 10 = Extra.</dd>
+        <dt>המנטורית</dt><dd>קודם המודל הפר‑כלי, ואז גרפיקה. ואז: "היום הגרפיקה".</dd>
+      </dl>
+      <div class="verdict"><b>מוכרע לפי המנטורית:</b> המודל קודם. המודל הפר‑כלי הוא <b>שינוי של שני קבצים</b> וחצי יום; הגרפיקה היא ימים. הייתי עושה את המודל קודם (כמו שהמנטורית אמרה), כי הגרפיקה בלי מקביליות לא תיראה כמו הווידאו — ואז תבני אותה פעמיים.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-label">ביצוע</div>
+  <h2>גלי היישום</h2>
+  <p class="lead">כל גל נגמר ב‑<b>gate</b>: טסטים ירוקים + commit. לא עוברים גל בלי לעבור את השער. עובדים ב‑Claude Code, גל אחד לפרומפט.</p>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 0</span> קו בסיס</h4>
+    <p class="goal">לפני שנוגעים במשהו — לתעד ולנעול את מה שעובד.</p>
+    <ul>
+      <li>להריץ <code>pytest --cov</code> ולשמור את הדוח כ‑baseline.</li>
+      
+      <li>לפתוח branch: <code>git checkout -b feature/per-piece-motion</code>.</li>
+    </ul>
+    <div class="gate">GATE — 116 ✓ · 100% ✓ · branch פתוח</div>
+  </div>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 1</span> המודל הפר‑כלי <span style="font-size:.62rem;font-family:var(--mono);background:var(--accent);color:#fff;padding:2px 7px;border-radius:5px;">הלב</span></h4>
+    <p class="goal">שני קבצים. אפס נגיעה ב‑model/rules/io. זה הגל שהמנטורית ביקשה — הליבה.</p>
+    <ul>
+      <li><code>realtime/arbiter.py</code> — <code>_active_motion</code> (יחיד) ⇐ <code>_active_motions</code> (dict לפי תא מקור). מפתח יציב: הכלי נשאר לוגית על המקור עד ההגעה (§10).</li>
+      <li><code>_resolve_motion</code> ⇐ לולאה שפותרת הגעות <b>לפי סדר כרונולוגי</b> של <code>arrival_time</code>.</li>
+      <li>פתרון התנגשויות: שני אויבים לאותו תא ⇒ <b>המאוחר אוכל את המוקדם</b> (כלל המנטורית). ה‑reversal הקיים נשאר קודם בסדר.</li>
+      <li><code>has_active_motion()</code> נשאר בחתימה (§20 דורש אותו) — אבל אף אחד לא צורך אותו יותר.</li>
+      <li><code>engine/game.py</code> — הגארד הגלובלי ⇐ <code>is_moving(source)</code> בלבד. אין דגל, אין מדיניות.</li>
+    </ul>
+    <div class="gate">GATE — טסטים חדשים למקביליות ✓ · commit "feat: per-piece concurrent motion model"</div>
+  </div>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 2</span> Snapshot + seams לגרפיקה</h4>
+    <p class="goal">להוציא את מה שהרנדרר צריך — בלי לכתוב רנדרר.</p>
+    <ul>
+      <li><code>model/snapshot.py</code> — <code>GameSnapshot</code> כ‑DTO קפוא, כולל מיקום פיקסלים מְחוֹשָב לכלי בתנועה.</li>
+      <li><code>GameEngine.snapshot() -&gt; GameSnapshot</code> (§20).</li>
+      <li><code>MoveResult</code> / <code>MoveValidation</code> — עם <code>reason</code> תמיד קיים.</li>
+    </ul>
+    <div class="gate">GATE — snapshot unit tests ✓</div>
+  </div>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 3</span> פיצול השכבות</h4>
+    <p class="goal">Controller, BoardMapper, io/ — לפי טבלת הבעלות של §4.</p>
+    <ul>
+      <li><code>input/board_mapper.py</code>, <code>input/controller.py</code>.</li>
+      <li><code>io/board_parser.py</code>, <code>io/board_printer.py</code>.</li>
+      <li><code>main.py</code> נשאר entry point של VPL בלבד (וההערה עם ה‑URL נשארת — דרישת המייל).</li>
+    </ul>
+    <div class="gate">GATE — הכיוון עדיין DAG ✓</div>
+  </div>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 4</span> הגרפיקה</h4>
+    <p class="goal">רק אחרי שיש snapshot. §12 + §17 Iteration 9.</p>
+    <ul>
+      <li><code>view/renderer.py</code> — מצייר מ‑snapshot בלבד. <b>לא</b> מקבל Board או Piece חיים (§19).</li>
+      <li><code>view/sprite_manager.py</code> — מצב הכלי ⇒ הפריים הנכון.</li>
+      <li><code>app.py</code> — entry point נפרד: לולאת <code>while</code>, OpenCV לקליקים ⇐ <code>Controller.click</code>.</li>
+    </ul>
+    <div class="gate">GATE — משחק עובד ✓</div>
+  </div>
+
+  <div class="wave">
+    <h4><span class="wnum">גל 5</span> אופציונלי — Position / Piece</h4>
+    <p class="goal">רק אם נשאר זמן. החלטה 05.</p>
+    <div class="gate">GATE — רק אם הכול ירוק ויש זמן</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-label">בקרה</div>
+  <h2>מה לא נוגעים בו</h2>
+  <table>
+    <tr><th>נשאר כמו שהוא</th><th>למה</th></tr>
+    <tr><td><code>model/board.py</code></td><td>אחסון לוגי בלבד. §19: "Board owns logical occupancy. RealTimeArbiter owns active motion state."</td></tr>
+    <tr><td><code>rules/rules.py</code> (הלוגיקה)</td><td>גאומטריה טהורה, stateless. §7.</td></tr>
+    <tr><td>טבלת ה‑movement ב‑Config</td><td>הבסיס ל"משתמשים מגדירים משחקים" (מייל #2).</td></tr>
+    <tr><td>promotion / start_row / jump</td><td>התנהגות קיימת שעובדת. סטיות מכוונות, מתועדות.</td></tr>
+    <tr><td>הכיוון <code>main → engine → {realtime, rules} → model</code></td><td>DAG נקי, אומת. §5: "The direction of dependency never points from model to UI."</td></tr>
+  </table>
+
+  <h3>שלוש נקודות שהמייל דורש שתדעי להסביר</h3>
+  <div class="chips">
+    <span class="chip"><b>ייצוג בינארי</b> — BoardPrinter מוחלף, Board לא נוגע</span>
+    <span class="chip"><b>משחקים מוגדרי‑משתמש</b> — Config בלבד, הוכח אמפירית 6/6</span>
+    <span class="chip"><b>code smells</b> — DRY ✓ SRP ✓ אפס magic strings ✓</span>
+  </div>
+</section>
+
+<section>
+  <div class="sec-label">סיכונים</div>
+  <h2>מה יכול להישבר</h2>
+  <table>
+    <tr><th>סיכון</th><th>חומרה</th><th>מה עושים</th></tr>
+    <tr><td>טסטים קיימים בודקים את החסימה הגלובלית</td><td><b style="color:var(--accent)">גבוה</b></td><td>צפוי. הם <b>משתנים</b> — החסימה הגלובלית כבר לא ההתנהגות הנכונה. כל טסט כזה נבדק ידנית, לא נמחק בעיוורון.</td></tr>
+    <tr><td>שתי הגעות באותו <code>advance_time</code> ⇒ סדר לא דטרמיניסטי</td><td><b style="color:var(--accent)">גבוה</b></td><td>פתרון לפי <code>arrival_time</code> עולה. שוויון מדויק ⇒ סדר יציב לפי תא מקור.</td></tr>
+    <tr><td>ה‑reversal של jump מתנגש עם כמה תנועות פעילות</td><td>בינוני</td><td>ה‑reversal נשאר ראשון בסדר הפתרון. טסט ייעודי.</td></tr>
+    <tr><td>refactor רוחבי (Position/Piece) שובר 116 טסטים לפני הדדליין</td><td>בינוני</td><td>נדחה לגל 5. לא חוסם משחק עובד.</td></tr>
+    <tr><td>VPL יורד</td><td>מקובל</td><td>לא שער. נבדק רק בסוף, אחרי שהכול מושלם לפי הקריטריונים.</td></tr>
+  </table>
+</section>
+
+</div>
+
+<footer>
+  Kung-Fu Chess · תוכנית יישום · נגזר מ‑Design Guide (9 Jul 2026) + מיילי המנטורית<br>
+  כל סטייה מתועדת ב‑IMPLEMENTATION_NOTES.md תחת "Deviations"
+</footer>
+
+<script>
+(function(){
+  document.querySelectorAll('.dec-head').forEach(function(h){
+    function toggle(){ h.parentElement.classList.toggle('open'); }
+    h.addEventListener('click', toggle);
+    h.addEventListener('keydown', function(e){
+      if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>
