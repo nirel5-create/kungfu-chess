@@ -26,7 +26,7 @@ class TestPiece(unittest.TestCase):
         p = self.board.piece_object_at(0, 0, STATE_MOVING)
         self.assertEqual(p.state, STATE_MOVING)
         # It carries no timing or destination data -- those live on Motion.
-        self.assertEqual(set(Piece.__slots__), {"id", "color", "kind", "cell", "state"})
+        self.assertEqual(set(Piece.__slots__), {"piece_id", "color", "kind", "cell", "state"})
         p.state = STATE_CAPTURED
         self.assertEqual(p.state, STATE_CAPTURED)
 
@@ -37,11 +37,11 @@ class TestPiece(unittest.TestCase):
         a, b = board.piece_object_at(0, 0), board.piece_object_at(0, 1)
         self.assertEqual(a.token, b.token)
         self.assertNotEqual(a, b)
-        self.assertNotEqual(a.id, b.id)
+        self.assertNotEqual(a.piece_id, b.piece_id)
 
     def test_ids_are_unique_across_the_board(self):
         board = Board([["wR", "wR", "wN"], ["bK", ".", "wR"]], self.config)
-        ids = [p.id for p in board.pieces()]
+        ids = [p.piece_id for p in board.pieces()]
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_a_piece_never_knows_about_pixels_or_rendering(self):

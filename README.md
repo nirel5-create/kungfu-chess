@@ -104,18 +104,18 @@ always hold.
 4. Once the game is over, the board never changes again.
 5. `wait(a); wait(b)` is identical to `wait(a + b)`.
 
-Three real bugs were found this way. They are written up in 
-  `docs/IMPLEMENTATION_NOTES.md`
+Three real bugs were found this way. They are written up in `IMPLEMENTATION_NOTES.md`;
 none of them could be expressed as a `print board` assertion.
 
 ## Documents
+
 | File | What it is |
 |---|---|
-| `docs/ARCHITECTURE_VISUAL.html` | How the architecture works, with a game simulation running inside it |
+| `ARCHITECTURE_VISUAL.html` | How the architecture works, with a game simulation running inside it |
 | `ARCHITECTURE_REPORT.html` | The full architecture report + quiz |
-| `docs/IMPLEMENTATION_PLAN.html` | The plan, decisions first |
-| `docs/IMPLEMENTATION_NOTES.md` | Deviations from the design guide, bugs found, SOLID audit, open questions |
-| `docs/COMPLIANCE.html` | Every guide section and email requirement, its status, and the test that proves it |
+| `IMPLEMENTATION_PLAN.html` | The plan, decisions first |
+| `IMPLEMENTATION_NOTES.md` | Deviations from the design guide, bugs found, SOLID audit, open questions |
+| `COMPLIANCE.html` | Every guide section and email requirement, its status, and the test that proves it |
 
 ## Tests
 

@@ -20,23 +20,24 @@ class Piece:
     test syntax (guide S6).
     """
 
-    __slots__ = ("id", "color", "kind", "cell", "state")
+    __slots__ = ("piece_id", "color", "kind", "cell", "state")
 
-    def __init__(self, id, color, kind, cell, state=STATE_IDLE):
-        self.id = id
+    def __init__(self, piece_id, color, kind, cell, state=STATE_IDLE):
+        self.piece_id = piece_id
         self.color = color
         self.kind = kind
         self.cell = Position(*cell)
         self.state = state
 
     @classmethod
-    def of(cls, token, cell, config, id=None, state=STATE_IDLE):
+    def of(cls, token, cell, config, piece_id=None, state=STATE_IDLE):
         """Build a Piece from the board's token. Config owns the token layout,
         so this is the one bridge between the two views -- and the only thing
         that would change if the token format did."""
         cell = Position(*cell)
         return cls(
-            id=id if id is not None else "{}@{},{}".format(token, cell.row, cell.col),
+            piece_id=(piece_id if piece_id is not None
+                     else f"{token}@{cell.row},{cell.col}"),
             color=config.color_of(token),
             kind=config.type_of(token),
             cell=cell,
@@ -49,11 +50,11 @@ class Piece:
         return self.color + self.kind
 
     def __eq__(self, other):
-        return isinstance(other, Piece) and self.id == other.id
+        return isinstance(other, Piece) and self.piece_id == other.piece_id
 
     def __hash__(self):
-        return hash(self.id)
+        return hash(self.piece_id)
 
     def __repr__(self):
         return "Piece(id={!r}, color={!r}, kind={!r}, cell={!r}, state={!r})".format(
-            self.id, self.color, self.kind, self.cell, self.state)
+            self.piece_id, self.color, self.kind, self.cell, self.state)

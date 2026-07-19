@@ -295,7 +295,7 @@ class TestPieceRulesReturnsDestinations(unittest.TestCase):
         config = Config()
         board = Board([["wR", ".", "bR", "wN"]], config)
         before = render(board)
-        dests = PieceRules(board, config).legal_destinations(board, "wR", (0, 0))
+        dests = PieceRules(config).legal_destinations(board, "wR", (0, 0))
         self.assertEqual(dests, {(0, 1), (0, 2)})   # (0,2) is the enemy; (0,3) is behind it
         self.assertEqual(render(board), before)    # read-only
 

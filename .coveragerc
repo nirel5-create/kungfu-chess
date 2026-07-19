@@ -1,0 +1,9 @@
+[run]
+omit =
+    view/img.py
+    tools/simulate.py
+    app.py
+
+[report]
+exclude_lines =
+    pragma: no cover

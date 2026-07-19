@@ -75,6 +75,18 @@ def check(game, board, prev_count, log):
         if BoardPrinter().print(board) != log["frozen"]:
             raise InvariantError("board changed after game_over")
 
+    # INV-5: a resting piece must refuse any move command. This guards the
+    # mentor's rule that a piece recovering after a move or jump cannot act.
+    for cell in list(game._rta._resting):
+        if board.piece_at(*cell) is None:
+            raise InvariantError(f"resting recorded on empty cell {cell}")
+        for dst in all_cells(board):
+            if dst != cell:
+                result = game.request_move(cell, dst)
+                if result.is_accepted:
+                    raise InvariantError(
+                        f"resting piece at {cell} accepted a move to {dst}")
+
     return count
 
 

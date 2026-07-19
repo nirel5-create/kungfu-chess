@@ -145,6 +145,28 @@ edge case forces a choice, take the conservative option and log it.
   Note the guide only mentions *clicks*; extending this to elapsed time is an
   interpretation, but the wait-additivity rule is explicit and forced the shape of the fix.
 
+### D-7. Rest states: short_rest returns to idle, not long_rest
+- **Source conflict.** The sprite `config.json` files say `short_rest ->
+  long_rest`. The mentor said in the video, of a jump: *"אחרי קפיצה במקום הולכים
+  למנוחה קצרה ופס"* -- short_rest, then done. The mentor also said the jump config
+  itself contains a mistake he would fix. Per the project's authority rule
+  (mentor > config files), we follow the mentor: `short_rest -> idle`.
+- **What was built.** The engine now has a rest state machine:
+  `idle -> move -> long_rest -> idle` and `idle -> jump -> short_rest -> idle`.
+  A resting piece refuses `request_move` and `request_jump` (reason `resting`) --
+  a rule of the game, so it lives in the engine, not the view. The snapshot
+  reports `idle / moving / jumping / resting` so the renderer can pick a sprite.
+- **Durations are Config data.** `long_rest_ms=2000`, `short_rest_ms=1000` are
+  sensible defaults; the real numbers live in the sprite config (frames / fps),
+  which is graphics data the engine must not read. A caller injects exact values
+  when the view knows them -- a one-line change, no engine edit.
+- **Two real bugs the fuzzer caught here:** (1) a rest started from the current
+  clock instead of the arrival/jump-end time, breaking `wait(a)+wait(b) ==
+  wait(a+b)`; fixed by measuring from the event time. (2) a piece captured while
+  resting left its rest behind on the now-empty cell; fixed by clearing rest on
+  capture and when the mover leaves its source. A sixth fuzz invariant now
+  asserts a resting piece never accepts a move.
+
 ### D-6. The io package is named `boardio`, not `io`
 - **Guide:** §5 names the package `io/`.
 - **Problem:** `io` is a Python standard-library module. A local `io/` package cannot
