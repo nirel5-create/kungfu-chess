@@ -201,6 +201,16 @@ class TestGameSnapshot(unittest.TestCase):
         self.assertEqual((king.x, king.y), (200, 100))
         self.assertEqual(king.state, "idle")
 
+    def test_board_offset_shifts_the_drawn_pixel_position(self):
+        # A framed board offsets every piece by board_offset, so the same king
+        # on cell (1, 2) is drawn 10px right and 20px down of its bare position.
+        config = Config(board_offset=(10, 20))
+        board = Board([["wR", ".", "."], [".", ".", "bK"]], config)
+        engine, _ = make_game(board, config)
+        king = next(p for p in engine.snapshot().pieces if p.kind == "K")
+        self.assertEqual((king.row, king.col), (1, 2))      # logical cell unchanged
+        self.assertEqual((king.x, king.y), (210, 120))      # 200+10, 100+20
+
     def test_a_moving_piece_reports_its_logical_cell_but_an_interpolated_pixel(self):
         self.engine.request_move((0, 0), (0, 2))    # 2 cells -> 2000ms
         self.engine.wait(1000)                      # exactly halfway

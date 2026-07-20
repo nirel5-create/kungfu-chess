@@ -73,6 +73,7 @@ class Config:
     def __init__(
         self,
         cell_size=100,
+        board_offset=(0, 0),
         colors=("w", "b"),
         piece_types=("K", "Q", "R", "B", "N", "P"),
         empty=".",
@@ -89,6 +90,9 @@ class Config:
         knight_deltas=_KNIGHT_DELTAS,
     ):
         self.cell_size = cell_size
+        self.board_offset = board_offset  # (x, y) pixels from image edge to the
+        #                                   first cell, for boards drawn with a
+        #                                   decorative frame around the squares.
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty

@@ -99,6 +99,7 @@ class GameEngine:
         what lets the renderer draw it between cells.
         """
         cell = self._config.cell_size
+        off_x, off_y = self._config.board_offset
         views = []
         for row in range(self._board.rows):
             for col in range(self._board.cols):
@@ -117,7 +118,7 @@ class GameEngine:
                 views.append(PieceView(
                     kind=self._config.type_of(token),
                     color=self._config.color_of(token),
-                    row=row, col=col, x=x, y=y, state=state,
+                    row=row, col=col, x=x + off_x, y=y + off_y, state=state,
                     rest_progress=progress))
         return GameSnapshot(
             board_width=self._board.cols, board_height=self._board.rows,

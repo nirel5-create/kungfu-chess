@@ -47,7 +47,9 @@ def build_game(config=None):  # pragma: no cover
     """Compose the whole graphical stack and return the parts app.py drives.
     Split out so it reads top-down; still untested because it wires real assets
     and OpenCV, but it only calls classes that are themselves tested."""
-    config = config or Config(cell_size=102)             # 822 / 8 ~= 102
+    config = config or Config(cell_size=98, board_offset=(13, 15))
+    #   the crystal board has a thin decorative frame, so cells are 98px and the
+    #   first cell starts 13px in and 15px down -- measured from the board image.
     board = Board([row[:] for row in _START], config)
     engine = GameEngine(board, config)
     controller = Controller(engine, BoardMapper(board, config), board, config)
