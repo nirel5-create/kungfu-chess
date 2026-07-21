@@ -83,6 +83,7 @@ def run():  # pragma: no cover
             controller.jump(x, y)
 
     cv2.namedWindow(_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(_WINDOW, 816, 816)   # open at the board's real size, not tiny
     cv2.setMouseCallback(_WINDOW, on_mouse)
 
     while True:
