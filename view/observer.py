@@ -21,7 +21,7 @@ CaptureEntry = namedtuple("CaptureEntry", "capturer_color victim_token cost cloc
 
 
 class GameObserver:
-    def __init__(self, config, white_name="White", black_name="Black"):
+    def __init__(self, config, white_name="Player 1", black_name="Player 2"):
         """config -- used only to read piece costs and colours.
         white_name/black_name -- shown beside each side's score; defaults are
             easy to change in one place, or a caller can pass real names."""

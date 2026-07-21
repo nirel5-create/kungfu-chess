@@ -24,10 +24,12 @@ class TestNamesAndInitialState(unittest.TestCase):
         self.assertEqual(self.obs.name_of("w"), "Alice")
         self.assertEqual(self.obs.name_of("b"), "Bob")
 
-    def test_names_default_to_white_and_black(self):
+    def test_names_default_to_player_one_and_two(self):
+        # Colour-neutral by default: the name stays right even if a future
+        # feature lets a player pick a different piece colour.
         obs = GameObserver(Config())
-        self.assertEqual(obs.name_of("w"), "White")
-        self.assertEqual(obs.name_of("b"), "Black")
+        self.assertEqual(obs.name_of("w"), "Player 1")
+        self.assertEqual(obs.name_of("b"), "Player 2")
 
     def test_scores_start_at_zero_and_log_is_empty(self):
         self.assertEqual(self.obs.score_of("w"), 0)
