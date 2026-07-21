@@ -123,7 +123,8 @@ class GameEngine:
         return GameSnapshot(
             board_width=self._board.cols, board_height=self._board.rows,
             cell_size=cell, pieces=tuple(views),
-            selected_cell=selected_cell, game_over=self._game_over)
+            selected_cell=selected_cell, game_over=self._game_over,
+            board_offset=self._config.board_offset)
 
     def _piece_state(self, cell):
         """The lifecycle state of a piece that is not currently in a move

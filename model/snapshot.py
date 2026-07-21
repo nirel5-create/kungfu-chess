@@ -13,7 +13,9 @@ PieceView = namedtuple(
     "PieceView", "kind color row col x y state rest_progress", defaults=(0.0,))
 
 GameSnapshot = namedtuple(
-    "GameSnapshot", "board_width board_height cell_size pieces selected_cell game_over")
+    "GameSnapshot",
+    "board_width board_height cell_size pieces selected_cell game_over board_offset",
+    defaults=((0, 0),))
 
 STATE_IDLE = "idle"
 STATE_MOVING = "moving"

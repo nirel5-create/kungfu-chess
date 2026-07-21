@@ -36,13 +36,27 @@ class FakeSprites:
         return [FakeFrame(f"{token}/{state}")]
 
 
+class _FakeBoardBuf:
+    """A stand-in board image with a cloneable .img, like the real Img. Must be
+    constructible with no args (type(x)() in _fresh_board), like the real Img."""
+    def __init__(self, tag="clone"):
+        self.img = _CloneableTag(tag)
+
+
+class _CloneableTag:
+    def __init__(self, tag):
+        self.tag = tag
+    def copy(self):
+        return _CloneableTag(self.tag)
+
+
 class FakeBoardImage:
     def __init__(self):
         self.loads = 0
 
     def __call__(self, path):
         self.loads += 1
-        return f"board#{self.loads}"
+        return _FakeBoardBuf(f"board#{self.loads}")
 
 
 def _snapshot_of(pieces):
@@ -93,20 +107,21 @@ class TestPlacements(unittest.TestCase):
 
 
 class TestRenderDraws(unittest.TestCase):
-    def test_render_loads_a_fresh_board_each_call(self):
+    def test_render_loads_the_board_once_then_clones_it(self):
         board_image = FakeBoardImage()
         r = Renderer(FakeSprites(), board_image, "board.png")
         snap = _snapshot_of([PieceView("R", "w", 0, 0, 0, 0, STATE_IDLE)])
         r.render(snap)
         r.render(snap)
-        self.assertEqual(board_image.loads, 2)            # not reused
+        r.render(snap)
+        self.assertEqual(board_image.loads, 1)   # read from disk once, cloned after
 
     def test_render_draws_every_piece_onto_the_board(self):
         r = Renderer(FakeSprites(), FakeBoardImage(), "board.png")
         pieces = [PieceView("R", "w", 0, 0, 0, 0, STATE_IDLE),
                   PieceView("K", "b", 7, 4, 400, 700, STATE_IDLE)]
         board = r.render(_snapshot_of(pieces))
-        self.assertEqual(board, "board#1")
+        self.assertEqual(board.img.tag, "board#1")   # cloned from the loaded board
 
     def test_render_skips_a_piece_with_no_sprites(self):
         import numpy as np
@@ -153,6 +168,12 @@ class TestSelectionHighlight(unittest.TestCase):
     def test_the_top_left_cell_highlights_at_the_origin(self):
         snap = GameSnapshot(8, 8, 100, (), (0, 0), False)
         self.assertEqual(self.r.highlight_rect(snap), (0, 0, 100, 100))
+
+    def test_the_highlight_shifts_by_the_board_offset(self):
+        # With a framed board (offset 13, 15), cell (2, 3) at size 100 lands at
+        # (13 + 300, 15 + 200), so the glow sits on the piece, not beside it.
+        snap = GameSnapshot(8, 8, 100, (), (2, 3), False, board_offset=(13, 15))
+        self.assertEqual(self.r.highlight_rect(snap), (313, 215, 100, 100))
 
 
 
@@ -244,6 +265,18 @@ class TestStateOverlays(unittest.TestCase):
         _draw_ring(board, 0, 0, 100, 0.0)                 # nothing to draw
         self.assertTrue((board.img == before).all())
 
+    def test_the_ring_offscreen_draws_nothing(self):
+        from view.renderer import _draw_ring
+        import numpy as np
+
+        class TinyBoard:
+            def __init__(self): self.img = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        board = TinyBoard()
+        before = board.img.copy()
+        _draw_ring(board, 500, 500, 98, 0.5)             # entirely off-image
+        self.assertTrue((board.img == before).all())
+
     def test_the_ring_draws_at_partial_progress(self):
         from view.renderer import _draw_ring
         import numpy as np
@@ -255,6 +288,77 @@ class TestStateOverlays(unittest.TestCase):
         _draw_ring(board, 0, 0, 100, 0.5)
         self.assertGreater(board.img.sum(), 0)            # arc drawn
 
+
+
+
+class TestMotion(unittest.TestCase):
+    """Breathing (a smooth vertical float) and jumping (a single arc) are pure
+    clock -> offset maths, tested here without drawing."""
+
+    def test_an_idle_piece_floats_up_and_back(self):
+        from view.renderer import _breathe_offset, _BREATHE_FLOAT
+        from model.snapshot import STATE_IDLE
+        offs = [_breathe_offset(STATE_IDLE, t, 100) for t in range(0, 3500, 200)]
+        limit = _BREATHE_FLOAT * 100 + 1e-6
+        self.assertTrue(all(-limit <= o <= limit for o in offs))
+        self.assertTrue(max(offs) > 0 and min(offs) < 0)   # actually drifts
+
+    def test_a_non_idle_piece_does_not_float(self):
+        from view.renderer import _breathe_offset
+        from model.snapshot import STATE_MOVING, STATE_JUMPING
+        self.assertEqual(_breathe_offset(STATE_MOVING, 1234, 100), 0.0)
+        self.assertEqual(_breathe_offset(STATE_JUMPING, 1234, 100), 0.0)
+
+    def test_a_moving_piece_sways_side_to_side(self):
+        from view.renderer import _walk_sway, _WALK_SWAY
+        from model.snapshot import STATE_MOVING
+        sways = [_walk_sway(STATE_MOVING, t, 100) for t in range(0, 600, 50)]
+        limit = _WALK_SWAY * 100 + 1e-6
+        self.assertTrue(all(-limit <= sw <= limit for sw in sways))
+        self.assertTrue(max(sways) > 0 and min(sways) < 0)   # actually sways
+
+    def test_a_still_piece_does_not_sway(self):
+        from view.renderer import _walk_sway
+        from model.snapshot import STATE_IDLE, STATE_JUMPING
+        self.assertEqual(_walk_sway(STATE_IDLE, 300, 100), 0.0)
+        self.assertEqual(_walk_sway(STATE_JUMPING, 300, 100), 0.0)
+
+    def test_a_jumping_piece_lifts_off_the_board_and_returns(self):
+        from view.renderer import _jump_lift
+        from model.snapshot import STATE_JUMPING
+        lifts = [_jump_lift(STATE_JUMPING, t, 100) for t in range(0, 900, 100)]
+        self.assertEqual(lifts[0], 0.0)          # starts on the ground
+        self.assertTrue(max(lifts) > 0)          # rises during the hop
+
+    def test_a_grounded_piece_has_no_lift(self):
+        from view.renderer import _jump_lift
+        from model.snapshot import STATE_IDLE, STATE_MOVING
+        self.assertEqual(_jump_lift(STATE_IDLE, 250, 100), 0.0)
+        self.assertEqual(_jump_lift(STATE_MOVING, 250, 100), 0.0)
+
+    def test_drawing_a_floating_piece_offsets_it_upward(self):
+        import numpy as np
+        from view.renderer import Renderer
+        from model.snapshot import STATE_IDLE
+
+        class RealFrame:
+            def __init__(self): self.img = np.ones((100, 100, 3), dtype=np.uint8)
+            def draw_on(self, board, x, y):
+                self.at = (x, y)
+                board.img[max(0, y):y + 100, max(0, x):x + 100] = 255
+
+        frame = RealFrame()
+        class RealSprites:
+            def frames(self, token, state): return [frame]  # noqa: ARG002
+
+        class TinyBoard:
+            def __init__(self): self.img = np.zeros((400, 400, 3), dtype=np.uint8)
+
+        r = Renderer(RealSprites(), lambda p: TinyBoard(), "b.png")
+        piece = PieceView("K", "w", 1, 1, 100, 100, STATE_IDLE, 0.0)
+        # clock at quarter period -> peak upward float, so y drawn < 100.
+        r.render(GameSnapshot(8, 8, 100, (piece,), None, False), clock_ms=875)
+        self.assertLess(frame.at[1], 100)        # floated up
 
 
 if __name__ == "__main__":
