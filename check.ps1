@@ -8,7 +8,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "TESTS FAILED - do not push" -ForegroundCo
 
 Write-Host "`n[2/3] coverage (must be 100%)" -ForegroundColor Cyan
 python -m pytest -q --cov=model --cov=rules --cov=realtime --cov=engine `
-    --cov=input --cov=boardio --cov=texttests --cov=main `
+    --cov=input --cov=boardio --cov=texttests --cov=view --cov=common --cov=main `
     --cov-report=term --cov-fail-under=100
 if ($LASTEXITCODE -ne 0) { Write-Host "COVERAGE BELOW 100% - do not push" -ForegroundColor Red; exit 1 }
 

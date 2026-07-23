@@ -1,7 +1,7 @@
 import pathlib
 import unittest
 
-from view.sprite_library import SpriteLibrary, _frame_number
+from view.sprite_library import SpriteLibrary, _frame_number, _load_with_img
 
 ASSETS = pathlib.Path(__file__).resolve().parents[2] / "assets" / "pieces_mine"
 
@@ -99,3 +99,24 @@ class TestRealLoaderIntegration(unittest.TestCase):
         frames = lib.frames("wR", "idle")
         self.assertTrue(frames)
         self.assertEqual(frames[0].img.shape, (64, 64, 4))  # resized, with alpha
+
+class TestRealLoaderRejectsUndecodableFile(unittest.TestCase):
+    """The default loader must fail loudly on a file it cannot decode.
+
+    A missing path is caught by numpy before we ever decode, so the only way to
+    reach our own guard is a file that exists but holds bytes that are not an
+    image -- a truncated or corrupted sprite, which is exactly the real-world
+    case the guard is there for.
+    """
+
+    def test_a_file_that_is_not_an_image_raises_file_not_found(self):
+        try:
+            import cv2  # noqa: F401 -- the loader needs it present
+        except ImportError:
+            self.skipTest("OpenCV not installed")
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = pathlib.Path(tmp) / "not_really.png"
+            junk.write_bytes(b"this is not a png")
+            with self.assertRaises(FileNotFoundError):
+                _load_with_img(str(junk), None)
