@@ -15,7 +15,7 @@ class TestRealTimeArbiter(unittest.TestCase):
         self.rta = RealTimeArbiter(self.board, self.config)
 
     def test_no_active_motion_initially(self):
-        self.assertFalse(self.rta.has_active_motion())
+        self.assertEqual(self.rta.active_motion_count(), 0)
 
     def test_no_airborne_piece_initially(self):
         self.assertFalse(self.rta.has_airborne_piece())
@@ -44,7 +44,7 @@ class TestRealTimeArbiter(unittest.TestCase):
         events = rta.advance_time(1000)
         self.assertEqual(events, [Motion("bR", (0, 1), (0, 0), 1000)])
         self.assertEqual(render(board), "wK . .")  # jumper stays, arriver removed
-        self.assertFalse(rta.has_active_motion())
+        self.assertEqual(rta.active_motion_count(), 0)
         self.assertFalse(rta.has_airborne_piece())  # jump resolved via capture
 
     def test_arrival_after_jump_window_lands_normally(self):
@@ -95,21 +95,21 @@ class TestRealTimeArbiter(unittest.TestCase):
 
     def test_start_motion_marks_active_and_leaves_board_unchanged(self):
         self.rta.start_motion("wR", (0, 0), (0, 2))
-        self.assertTrue(self.rta.has_active_motion())
+        self.assertGreater(self.rta.active_motion_count(), 0)
         self.assertEqual(render(self.board), "wR . .")
 
     def test_advance_time_before_arrival_does_not_apply_move(self):
         self.rta.start_motion("wR", (0, 0), (0, 1))  # 1 cell -> 1000ms
         self.assertEqual(self.rta.advance_time(999), [])
         self.assertEqual(render(self.board), "wR . .")
-        self.assertTrue(self.rta.has_active_motion())
+        self.assertGreater(self.rta.active_motion_count(), 0)
 
     def test_advance_time_at_exact_arrival_applies_move(self):
         self.rta.start_motion("wR", (0, 0), (0, 1))
         events = self.rta.advance_time(1000)
         self.assertEqual(events, [Motion("wR", (0, 0), (0, 1), 1000)])
         self.assertEqual(render(self.board), ". wR .")
-        self.assertFalse(self.rta.has_active_motion())
+        self.assertEqual(self.rta.active_motion_count(), 0)
 
     def test_partial_waits_accumulate_to_arrival(self):
         self.rta.start_motion("wR", (0, 0), (0, 2))  # 2 cells -> 2000ms
@@ -129,10 +129,10 @@ class TestRealTimeArbiter(unittest.TestCase):
     def test_can_start_new_motion_immediately_after_arrival(self):
         self.rta.start_motion("wR", (0, 0), (0, 1))  # 1 cell -> 1000ms
         self.rta.advance_time(1000)  # arrives; board is now ". wR ."
-        self.assertFalse(self.rta.has_active_motion())
+        self.assertEqual(self.rta.active_motion_count(), 0)
 
         self.rta.start_motion("wR", (0, 1), (0, 2))  # immediately, no extra wait
-        self.assertTrue(self.rta.has_active_motion())
+        self.assertGreater(self.rta.active_motion_count(), 0)
 
     def test_king_was_captured_true_on_arrival_into_enemy_king(self):
         board = Board([["wR", "bK"]], self.config)

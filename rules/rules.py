@@ -18,7 +18,7 @@ class RuleEngine:
     def __init__(self, board, config, piece_rules=None):
         self._board = board
         self._config = config
-        self._rules = piece_rules or PieceRules(board, config)
+        self._rules = piece_rules or PieceRules(config)
 
     def validate_move(self, src, dst):
         """-> MoveValidation. reason is always set; "ok" when valid."""
@@ -48,7 +48,7 @@ class PieceRules:
     game-over. It only computes destinations from a board and a piece.
     """
 
-    def __init__(self, board, config):
+    def __init__(self, config):
         self._config = config
 
     def legal_destinations(self, board, piece, src):

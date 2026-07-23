@@ -8,5 +8,6 @@ REASON_OK = "ok"
 REASON_GAME_OVER = "game_over"
 REASON_MOTION_IN_PROGRESS = "motion_in_progress"
 REASON_AIRBORNE = "airborne"
+REASON_RESTING = "resting"
 
 ACCEPTED = MoveResult(True, REASON_OK)

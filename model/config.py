@@ -73,6 +73,7 @@ class Config:
     def __init__(
         self,
         cell_size=100,
+        board_offset=(0, 0),
         colors=("w", "b"),
         piece_types=("K", "Q", "R", "B", "N", "P"),
         empty=".",
@@ -81,11 +82,17 @@ class Config:
         king_type="K",
         promotions=None,
         jump_ms=1000,
+        long_rest_ms=2000,
+        short_rest_ms=1000,
+        piece_costs=None,
         orthogonal_deltas=_ORTHOGONAL,
         diagonal_deltas=_DIAGONAL,
         knight_deltas=_KNIGHT_DELTAS,
     ):
         self.cell_size = cell_size
+        self.board_offset = board_offset  # (x, y) pixels from image edge to the
+        #                                   first cell, for boards drawn with a
+        #                                   decorative frame around the squares.
         self.colors = colors
         self.piece_types = piece_types
         self.empty = empty
@@ -108,6 +115,21 @@ class Config:
         self.promotions = {"wP": "wQ", "bP": "bQ"} if promotions is None else promotions
         # ms a piece stays airborne after `jump`.
         self.jump_ms = jump_ms
+        # How long a piece rests after finishing a move (long) or a jump
+        # (short), during which it accepts no command. Sensible defaults: the
+        # real numbers live in the sprite config.json (frames / fps) but that is
+        # graphics data the engine must not read, so a caller injects the exact
+        # values here when the view knows them. Short < long because, per the
+        # mentor, a jump is less tiring than a move.
+        self.long_rest_ms = long_rest_ms
+        self.short_rest_ms = short_rest_ms
+        # The "cost" of each piece type, summed into a player's score when they
+        # capture. Standard chess values by default; kept as data (not hardcoded
+        # in the scorer) so a custom game can retune them in one place. The king
+        # has no cost -- capturing it ends the game, it is never scored.
+        self.piece_costs = piece_costs if piece_costs is not None else {
+            "P": 1, "N": 3, "B": 3, "R": 5, "Q": 9, "K": 0,
+        }
 
     # --- token layout: the only class that reads a token's insides ----------
 
@@ -116,6 +138,10 @@ class Config:
 
     def type_of(self, token):
         return token[1]
+
+    def cost_of(self, token):
+        """The score value of a piece, by its type. Unknown types cost 0."""
+        return self.piece_costs.get(self.type_of(token), 0)
 
     def is_king(self, token):
         return self.type_of(token) == self.king_type

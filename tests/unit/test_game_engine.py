@@ -3,7 +3,7 @@ import unittest
 from engine.game import GameEngine
 from model.board import Board
 from model.config import Config
-from tests.helpers import cell_center, make_game, render, run_fixture, wait_for
+from tests.helpers import CFG, cell_center, make_game, render, run_fixture, wait_for
 from model.game_state import GameState
 
 
@@ -33,7 +33,28 @@ class TestGameMotionWiring(unittest.TestCase):
         self.assertEqual(reason.reason, GameEngine.REASON_MOTION_IN_PROGRESS)
         self.assertEqual(render(board), "wR . bR")  # still untouched
 
-    def test_piece_moves_again_immediately_after_arrival(self):
+    def test_piece_moves_again_after_arrival_and_rest(self):
+        # A piece that just arrived is in long_rest and refuses to move until it
+        # has elapsed. This is the mentor's rule: a piece recovers after a move.
+        p0_x, p0_y = cell_center(0, 0)
+        p1_x, p1_y = cell_center(1, 0)
+        p2_x, p2_y = cell_center(2, 0)
+        fixture = (
+            "Board:\nwR . .\nCommands:\n"
+            f"click {p0_x} {p0_y}\n"
+            f"click {p1_x} {p1_y}\n"
+            f"wait {wait_for(1)}\n"
+            f"wait {CFG.long_rest_ms}\n"   # let the rest elapse
+            f"click {p1_x} {p1_y}\n"
+            f"click {p2_x} {p2_y}\n"
+            f"wait {wait_for(1)}\n"
+            "print board\n"
+        )
+        self.assertEqual(run_fixture(fixture), ". . wR\n")
+
+    def test_a_piece_cannot_move_again_while_still_resting(self):
+        # The same script without waiting out the rest: the second move is
+        # refused, so the piece stays on cell (1,0).
         p0_x, p0_y = cell_center(0, 0)
         p1_x, p1_y = cell_center(1, 0)
         p2_x, p2_y = cell_center(2, 0)
@@ -47,7 +68,7 @@ class TestGameMotionWiring(unittest.TestCase):
             f"wait {wait_for(1)}\n"
             "print board\n"
         )
-        self.assertEqual(run_fixture(fixture), ". . wR\n")
+        self.assertEqual(run_fixture(fixture), ". wR .\n")
 
     def test_capturing_king_ends_the_game(self):
         config = Config()
@@ -80,8 +101,9 @@ class TestGameMotionWiring(unittest.TestCase):
         game.wait(wait_for(1))
         self.assertEqual(render(board), ". wR")
 
-        reason = game.request_move((0, 1), (0, 0))  # move back, should still work
-        self.assertTrue(reason.is_accepted)  # legal, no game_over gate
+        game.wait(config.long_rest_ms)                 # let it recover
+        reason = game.request_move((0, 1), (0, 0))     # now on (0,1); move back
+        self.assertTrue(reason.is_accepted)            # legal, no game_over gate
 
 
 class TestGameJump(unittest.TestCase):
@@ -178,6 +200,16 @@ class TestGameSnapshot(unittest.TestCase):
         self.assertEqual((king.row, king.col), (1, 2))
         self.assertEqual((king.x, king.y), (200, 100))
         self.assertEqual(king.state, "idle")
+
+    def test_board_offset_shifts_the_drawn_pixel_position(self):
+        # A framed board offsets every piece by board_offset, so the same king
+        # on cell (1, 2) is drawn 10px right and 20px down of its bare position.
+        config = Config(board_offset=(10, 20))
+        board = Board([["wR", ".", "."], [".", ".", "bK"]], config)
+        engine, _ = make_game(board, config)
+        king = next(p for p in engine.snapshot().pieces if p.kind == "K")
+        self.assertEqual((king.row, king.col), (1, 2))      # logical cell unchanged
+        self.assertEqual((king.x, king.y), (210, 120))      # 200+10, 100+20
 
     def test_a_moving_piece_reports_its_logical_cell_but_an_interpolated_pixel(self):
         self.engine.request_move((0, 0), (0, 2))    # 2 cells -> 2000ms

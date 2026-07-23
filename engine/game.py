@@ -1,7 +1,11 @@
 from realtime.arbiter import RealTimeArbiter
-from model.snapshot import GameSnapshot, PieceView, STATE_IDLE, STATE_MOVING
+from model.snapshot import (
+    GameSnapshot, PieceView, STATE_IDLE, STATE_MOVING, STATE_JUMPING,
+    STATE_RESTING_LONG, STATE_RESTING_SHORT,
+)
 from engine.results import (
     MoveResult, ACCEPTED, REASON_GAME_OVER, REASON_MOTION_IN_PROGRESS, REASON_AIRBORNE,
+    REASON_RESTING,
 )
 from rules.rules import RuleEngine
 
@@ -23,6 +27,7 @@ class GameEngine:
     REASON_GAME_OVER = REASON_GAME_OVER
     REASON_MOTION_IN_PROGRESS = REASON_MOTION_IN_PROGRESS
     REASON_AIRBORNE = REASON_AIRBORNE
+    REASON_RESTING = REASON_RESTING
 
     def __init__(self, board, config, validator=None, arbiter=None):
         self._board = board
@@ -45,6 +50,8 @@ class GameEngine:
             return MoveResult(False, REASON_MOTION_IN_PROGRESS)  # only that piece
         if self._rta.is_airborne(src):
             return MoveResult(False, REASON_AIRBORNE)  # rule 2: a jumper stays put
+        if self._rta.is_resting(src):
+            return MoveResult(False, REASON_RESTING)  # recovering after a move/jump
         validation = self._validator.validate_move(src, dst)
         if not validation.is_valid:
             return MoveResult(False, validation.reason)  # rule-level reason, verbatim
@@ -70,6 +77,8 @@ class GameEngine:
             return  # rule 6: nothing there to jump (captured/empty cell)
         if self._rta.is_moving(cell):
             return  # rule 5: a moving piece cannot jump
+        if self._rta.is_resting(cell):
+            return  # a recovering piece cannot jump
         if self._rta.has_airborne_piece():
             return  # one active jump at a time (mirrors motion_in_progress)
         self._rta.start_jump(piece, cell)
@@ -90,6 +99,7 @@ class GameEngine:
         what lets the renderer draw it between cells.
         """
         cell = self._config.cell_size
+        off_x, off_y = self._config.board_offset
         views = []
         for row in range(self._board.rows):
             for col in range(self._board.cols):
@@ -97,16 +107,42 @@ class GameEngine:
                 if token is None:
                     continue
                 motion = self._rta.motion_from((row, col))
-                if motion is None:
-                    x, y, state = col * cell, row * cell, STATE_IDLE
-                else:
+                if motion is not None:
                     x, y = self._rta.interpolate(motion, cell)
                     state = STATE_MOVING
+                    progress = 0.0
+                else:
+                    x, y = col * cell, row * cell
+                    state = self._piece_state((row, col))
+                    progress = self._rest_progress((row, col), state)
                 views.append(PieceView(
                     kind=self._config.type_of(token),
                     color=self._config.color_of(token),
-                    row=row, col=col, x=x, y=y, state=state))
+                    row=row, col=col, x=x + off_x, y=y + off_y, state=state,
+                    rest_progress=progress))
         return GameSnapshot(
             board_width=self._board.cols, board_height=self._board.rows,
             cell_size=cell, pieces=tuple(views),
-            selected_cell=selected_cell, game_over=self._game_over)
+            selected_cell=selected_cell, game_over=self._game_over,
+            board_offset=self._config.board_offset)
+
+    def _piece_state(self, cell):
+        """The lifecycle state of a piece that is not currently in a move
+        (moving is handled separately, since it also needs a pixel position).
+        Order matters: airborne wins over resting, resting over idle. A rest is
+        reported as long or short so the view can pick the matching sprites."""
+        if self._rta.is_airborne(cell):
+            return STATE_JUMPING
+        if self._rta.is_resting(cell):
+            return (STATE_RESTING_SHORT if self._rta.rest_kind(cell) == "short"
+                    else STATE_RESTING_LONG)
+        return STATE_IDLE
+
+    def _rest_progress(self, cell, state):
+        """How far a resting piece is through its cooldown (0..1), using the
+        duration that matches its rest kind. Zero for anything not resting."""
+        if state == STATE_RESTING_SHORT:
+            return self._rta.rest_progress(cell, self._config.short_rest_ms)
+        if state == STATE_RESTING_LONG:
+            return self._rta.rest_progress(cell, self._config.long_rest_ms)
+        return 0.0
