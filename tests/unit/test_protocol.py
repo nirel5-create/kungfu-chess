@@ -1,0 +1,183 @@
+import json
+
+import pytest
+
+from common import protocol
+from common.protocol import ProtocolError
+from model.board import Board
+from model.config import Config
+from model.position import Position
+from model.snapshot import GameSnapshot, PieceView
+from tests.helpers import CFG, make_game
+
+
+def _small_snapshot(selected_cell=None):
+    board = Board([["wR", "."], [".", "bK"]], CFG)
+    engine, _ = make_game(board, CFG)
+    return engine.snapshot(selected_cell=selected_cell)
+
+
+# --- 1. builders ------------------------------------------------------------
+
+def test_every_builder_produces_a_dict_whose_type_matches_its_constant():
+    assert protocol.move((0, 0), (0, 1))["type"] == protocol.MOVE
+    assert protocol.jump((1, 1))["type"] == protocol.JUMP
+    assert protocol.play()["type"] == protocol.PLAY
+    assert protocol.room_create("my room")["type"] == protocol.ROOM_CREATE
+    assert protocol.room_join("room-id")["type"] == protocol.ROOM_JOIN
+    assert protocol.state(_small_snapshot())["type"] == protocol.STATE
+    assert protocol.assigned("w")["type"] == protocol.ASSIGNED
+    assert protocol.countdown(5)["type"] == protocol.COUNTDOWN
+    assert protocol.game_over("w")["type"] == protocol.GAME_OVER
+    assert protocol.matchmaking("searching")["type"] == protocol.MATCHMAKING
+    assert protocol.room("room-id")["type"] == protocol.ROOM
+    assert protocol.error("bad move")["type"] == protocol.ERROR
+
+
+# --- 2. round trip, one message of each type --------------------------------
+
+def test_loads_of_dumps_round_trips_for_one_message_of_each_type():
+    messages = [
+        protocol.move((0, 0), (1, 1)),
+        protocol.jump((2, 2)),
+        protocol.play(),
+        protocol.room_create("my room"),
+        protocol.room_join("room-id"),
+        protocol.state(_small_snapshot()),
+        protocol.assigned("w"),
+        protocol.countdown(5),
+        protocol.game_over("b", rating={"w": 1200, "b": 1180}),
+        protocol.matchmaking("searching"),
+        protocol.room("room-id"),
+        protocol.error("bad move"),
+    ]
+    for message in messages:
+        assert protocol.loads(protocol.dumps(message)) == message
+
+
+# --- 3-8. loads validation ---------------------------------------------------
+
+def test_malformed_json_raises_protocol_error_malformed_json():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads("{not valid json")
+    assert excinfo.value.code == ProtocolError.MALFORMED_JSON
+
+
+def test_a_json_list_raises_not_an_object():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads("[1, 2, 3]")
+    assert excinfo.value.code == ProtocolError.NOT_AN_OBJECT
+
+
+def test_a_dict_without_type_raises_missing_type():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"src": [0, 0]}))
+    assert excinfo.value.code == ProtocolError.MISSING_TYPE
+
+
+def test_an_unknown_type_raises_unknown_type():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": "not_a_real_type"}))
+    assert excinfo.value.code == ProtocolError.UNKNOWN_TYPE
+
+
+def test_a_move_missing_dst_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.MOVE, "src": [0, 0]}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_a_move_whose_src_is_not_a_two_element_int_list_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.MOVE, "src": [0], "dst": [1, 1]}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+# --- 9-12. snapshot round trip ----------------------------------------------
+
+def test_snapshot_round_trip_from_a_real_engine_matches_field_for_field():
+    snapshot = _small_snapshot()
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert decoded == snapshot
+    assert isinstance(decoded.pieces, tuple)
+    assert all(isinstance(piece, PieceView) for piece in decoded.pieces)
+
+
+def test_snapshot_round_trip_with_selected_cell_none():
+    snapshot = _small_snapshot(selected_cell=None)
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert decoded.selected_cell is None
+
+
+def test_snapshot_round_trip_with_selected_cell_set_decodes_to_position():
+    snapshot = _small_snapshot(selected_cell=Position(0, 0))
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert decoded.selected_cell == Position(0, 0)
+    assert isinstance(decoded.selected_cell, Position)
+
+
+def test_a_snapshot_taken_mid_motion_round_trips_without_losing_precision():
+    board = Board([["wR", ".", "."]], CFG)
+    engine, _ = make_game(board, CFG)
+    engine.request_move((0, 0), (0, 2))
+    engine.wait(333)  # partway through the first of two cells
+    snapshot = engine.snapshot()
+    moving_piece = next(piece for piece in snapshot.pieces if piece.state == "moving")
+    assert moving_piece.x != int(moving_piece.x)
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert decoded == snapshot
+    assert decoded.pieces[0].x == snapshot.pieces[0].x
+
+
+def test_state_message_round_trips_and_nested_snapshot_still_decodes():
+    snapshot = _small_snapshot(selected_cell=Position(0, 0))
+    message = protocol.state(snapshot)
+    round_tripped = protocol.loads(protocol.dumps(message))
+    assert round_tripped == message
+    decoded = protocol.decode_snapshot(round_tripped["snapshot"])
+    assert decoded == snapshot
+
+
+# --- 14-18. corrections and additions ---------------------------------------
+
+def test_decoded_snapshot_board_offset_is_a_tuple_not_a_list():
+    snapshot = _small_snapshot()
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert isinstance(decoded.board_offset, tuple)
+    assert not isinstance(decoded.board_offset, list)
+
+
+def test_decoded_snapshot_pieces_is_a_tuple_of_pieceview_instances():
+    snapshot = _small_snapshot()
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert isinstance(decoded.pieces, tuple)
+    assert all(isinstance(piece, PieceView) for piece in decoded.pieces)
+
+
+def test_a_decoded_non_none_selected_cell_is_a_position_instance():
+    snapshot = _small_snapshot(selected_cell=Position(1, 0))
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert isinstance(decoded.selected_cell, Position)
+
+
+def test_rest_progress_round_trips_as_a_float_including_a_nonzero_value():
+    piece = PieceView(kind="P", color="w", row=0, col=0, x=0.0, y=0.0,
+                       state="resting_short", rest_progress=0.42)
+    snapshot = GameSnapshot(
+        board_width=1, board_height=1, cell_size=100, pieces=(piece,),
+        selected_cell=None, game_over=False, board_offset=(0, 0))
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert decoded.pieces[0].rest_progress == 0.42
+    assert isinstance(decoded.pieces[0].rest_progress, float)
+
+
+def test_a_snapshot_with_a_non_default_board_offset_round_trips_exactly():
+    config = Config(board_offset=(7, 13))
+    board = Board([["wK"]], config)
+    engine, _ = make_game(board, config)
+    snapshot = engine.snapshot()
+    assert snapshot.board_offset == (7, 13)
+    decoded = protocol.decode_snapshot(protocol.encode_snapshot(snapshot))
+    assert isinstance(decoded.board_offset, tuple)
+    assert decoded.board_offset == (7, 13)
+    assert decoded == snapshot

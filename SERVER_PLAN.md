@@ -256,9 +256,51 @@ Two details that are easy to get wrong, so handle them explicitly:
 
 Use the existing helpers in `tests/helpers.py` for building boards rather than
 duplicating setup.
+## STEP 2 — CORRECTIONS AND ADDITIONS (authoritative; override anything above)
 
+### Verified namedtuple shapes — use exactly these
+
+    PieceView:    kind color row col x y state rest_progress   (8 fields; rest_progress is a float, default 0.0)
+    GameSnapshot: board_width board_height cell_size pieces selected_cell game_over board_offset
+                  (7 fields; board_offset is a TUPLE, default (0, 0))
+
+### Full-snapshot decision (state it in the module docstring)
+
+The server sends the COMPLETE board state every tick, never deltas. Every message
+is therefore the whole truth, so client and server cannot drift, a reconnecting
+client resyncs with no special logic, and a viewer joining mid-game just receives
+the current state. Bandwidth is irrelevant for a local two-player server, and
+deltas would buy nothing while adding exactly the synchronisation complexity we
+are trying to avoid.
+
+### Three round-trip traps — all three are verified real, handle each explicitly
+
+1. `board_offset` is a tuple. JSON turns it into a list, and `(0, 0) != [0, 0]`.
+   `decode_snapshot` MUST rebuild it as a tuple.
+2. `pieces` is a tuple of PieceView. JSON gives a list. `decode_snapshot` MUST
+   rebuild a tuple, and each element MUST be a PieceView, not a list.
+3. `Position` subclasses tuple, so `Position(1, 2) == (1, 2)` is True. An equality
+   check therefore CANNOT detect that decoding returned a plain tuple instead of a
+   Position. Tests MUST assert `isinstance(decoded.selected_cell, Position)`
+   in addition to equality. A test that only compares with `==` is green-for-nothing.
+
+### Additional required tests (append to the Step 2 list)
+
+14. a decoded snapshot's `board_offset` is a tuple, not a list
+15. a decoded snapshot's `pieces` is a tuple, and each element `isinstance(..., PieceView)`
+16. a decoded non-None `selected_cell` satisfies `isinstance(..., Position)`
+17. `rest_progress` round-trips as a float, including a non-zero value
+18. a snapshot with a non-default `board_offset` (e.g. (7, 13)) round-trips exactly
+
+### Style gate (now enforced)
+
+`python -m pylint common/` must score 10.00/10 before committing. Suppress a
+warning only with an explicit code and an inline comment giving the reason, as in
+`common/bus.py`.
 ---
-
+Write-Host "`n[4/4] pylint (must be 10.00/10)" -ForegroundColor Cyan
+python -m pylint common model rules realtime engine input boardio view main.py
+if ($LASTEXITCODE -ne 0) { Write-Host "PYLINT NOT CLEAN - do not push" -ForegroundColor Red; exit 1 }
 ## STOP HERE
 
 After Step 2 passes, report back with the test summary. Do **not** start Step 3
