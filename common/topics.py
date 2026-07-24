@@ -1,6 +1,7 @@
-# Bus topic names, in one place, so a typo is impossible and the full event
-# vocabulary is readable at a glance (mirrors how ERROR_* codes live in one
-# module elsewhere in this codebase).
+"""Bus topic names, in one place, so a typo is impossible and the full event
+vocabulary is readable at a glance (mirrors how ERROR_* codes live in one
+module elsewhere in this codebase).
+"""
 
 SNAPSHOT = "snapshot"          # a new GameSnapshot arrived
 SCORE_UPDATE = "score_update"  # Slide 1a

@@ -1,3 +1,5 @@
+"""Synchronous, in-process publish/subscribe bus shared by client and server."""
+
 import logging
 
 
@@ -63,7 +65,9 @@ class Bus:
         for handler in handlers:
             try:
                 handler(payload)
-            except Exception:
+            except Exception:  # pylint: disable=W0718
+                # Deliberate: one bad handler must never stop the others
+                # (see docstring above), so every exception is caught here.
                 logging.getLogger(__name__).exception(
                     "Bus handler for topic %r raised", topic)
         return len(handlers)
