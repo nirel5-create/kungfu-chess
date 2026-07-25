@@ -46,7 +46,7 @@ def test_loads_of_dumps_round_trips_for_one_message_of_each_type():
         protocol.state(_small_snapshot()),
         protocol.assigned("w"),
         protocol.countdown(5),
-        protocol.game_over("b", rating={"w": 1200, "b": 1180}),
+        protocol.game_over("b", rating={"you": 1180, "delta": -20}),
         protocol.matchmaking("searching"),
         protocol.room("room-id"),
         protocol.error("bad move"),
@@ -181,3 +181,52 @@ def test_a_snapshot_with_a_non_default_board_offset_round_trips_exactly():
     assert isinstance(decoded.board_offset, tuple)
     assert decoded.board_offset == (7, 13)
     assert decoded == snapshot
+
+# --- decode_snapshot hardening: malformed input raises ProtocolError ---------
+
+
+def test_decode_snapshot_on_non_dict_raises_bad_payload():
+    for bad in (None, [1, 2], "snapshot", 42):
+        with pytest.raises(ProtocolError) as excinfo:
+            protocol.decode_snapshot(bad)
+        assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_decode_snapshot_missing_field_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_snapshot({"board_width": 8, "board_height": 8})
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_decode_snapshot_malformed_selected_cell_raises_bad_payload():
+    base = protocol.encode_snapshot(_small_snapshot())
+    base["selected_cell"] = [1]  # wrong shape: not a 2-element cell
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_snapshot(base)
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_decode_snapshot_malformed_board_offset_raises_bad_payload():
+    base = protocol.encode_snapshot(_small_snapshot())
+    base["board_offset"] = [0]  # wrong shape
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_snapshot(base)
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_decode_snapshot_piece_missing_field_raises_bad_payload():
+    base = protocol.encode_snapshot(_small_snapshot())
+    base["pieces"] = [{"kind": "R"}]  # a piece dict missing most fields
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_snapshot(base)
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_state_message_with_garbage_snapshot_is_caught_not_crashed():
+    # a structurally valid 'state' envelope whose snapshot is rubbish:
+    # loads() passes (the 'snapshot' key exists) but decode must not crash.
+    msg = protocol.loads(protocol.dumps({"type": "state", "snapshot": {"board_width": 8}}))
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_snapshot(msg["snapshot"])
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+

@@ -135,9 +135,11 @@ def move(src, dst):
 
 
 def jump(cell):
-    """`cell` is a `(row, col)` pair naming the square the piece jumps to. Unlike
-    `move`, there is no source cell in the message: the server already knows which
-    piece is selected and treats a jump as an alternate landing for that piece."""
+    """`cell` is a `(row, col)` pair naming the cell of the piece that jumps -- its
+    OWN current cell, not a destination. A jump does not move the piece: it stays on
+    its logical square and only re-arms (its cooldown/state changes). There is no
+    source/target pair because nothing travels. The server hands `cell` to
+    `request_jump(cell)`, which locates the piece sitting there and jumps it."""
     return {"type": JUMP, "cell": [cell[0], cell[1]]}
 
 
@@ -156,9 +158,10 @@ def room_create(name):
 
 
 def room_join(room_id):
-    """`room_id` is the opaque identifier previously handed out in a `room`
-    message -- not the room's display name. The server may reply with `room` on
-    success or `error` if the id is unknown or the room is full."""
+    """`room_id` is the room's id, which is also its human-readable name -- the same
+    string the creator chose and the value shown at the top of the screen (per the
+    slides, the room id is essentially the room name). The server may reply with
+    `room` on success, or `error` if no such room exists."""
     return {"type": ROOM_JOIN, "id": room_id}
 
 
@@ -189,10 +192,11 @@ def countdown(seconds):
 
 
 def game_over(winner, rating=None):
-    """`winner` is `"w"`, `"b"`, or `None` for a draw. `rating` is an optional dict
-    of post-game rating info (e.g. `{"w": 1200, "b": 1180}`) and is `None` when the
-    server has no rating system enabled or nothing to report. Once sent, the game
-    is finished; the receiver should stop accepting further moves."""
+    """`winner` is `"w"`, `"b"`, or `None` for a draw. `rating`, when present, is
+    this client's own result: `{"you": <new rating>, "delta": <signed change>}`,
+    where `delta` is the ELO adjustment the server has ALREADY applied and persisted
+    (so `you == old + delta`). It is `None` when there is no rating to report. Once
+    sent, the game is finished; the receiver should stop accepting further moves."""
     return {"type": GAME_OVER, "winner": winner, "rating": rating}
 
 
@@ -205,9 +209,9 @@ def matchmaking(status):
 
 
 def room(room_id):
-    """`room_id` is the opaque identifier the server assigned to a room, sent in
-    reply to `room_create` or `room_join`. The receiver must hold onto it verbatim
-    and pass it back in a future `room_join` -- it is not meant for display."""
+    """`room_id` is the room's id, sent in reply to `room_create` or `room_join`.
+    It doubles as the room's name and is written at the top of the client's screen
+    so a player can read it out and invite someone to `room_join` the same id."""
     return {"type": ROOM, "id": room_id}
 
 
@@ -246,17 +250,39 @@ def decode_snapshot(data):
     """dict -> GameSnapshot. Rebuilds the two traps JSON introduces: `pieces`
     comes back as a tuple of PieceView (not a list of list), and
     `board_offset` comes back as a tuple (not a list), so equality with a
-    snapshot built by the engine holds field for field."""
-    selected = data["selected_cell"]
-    return GameSnapshot(
-        board_width=data["board_width"],
-        board_height=data["board_height"],
-        cell_size=data["cell_size"],
-        pieces=tuple(_decode_piece(piece) for piece in data["pieces"]),
-        selected_cell=Position(selected[0], selected[1]) if selected is not None else None,
-        game_over=data["game_over"],
-        board_offset=tuple(data["board_offset"]),
-    )
+    snapshot built by the engine holds field for field.
+
+    Any structurally bad input -- not a dict, a missing field, or a malformed
+    `selected_cell`/`board_offset` -- raises ProtocolError(BAD_PAYLOAD) rather
+    than a raw KeyError/TypeError, upholding this module's promise that bad
+    input never crashes the server."""
+    if not isinstance(data, dict):
+        raise ProtocolError(ProtocolError.BAD_PAYLOAD)
+    try:
+        selected = data["selected_cell"]
+        return GameSnapshot(
+            board_width=data["board_width"],
+            board_height=data["board_height"],
+            cell_size=data["cell_size"],
+            pieces=tuple(_decode_piece(piece) for piece in data["pieces"]),
+            selected_cell=_decode_cell(selected) if selected is not None else None,
+            game_over=data["game_over"],
+            board_offset=_decode_offset(data["board_offset"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProtocolError(ProtocolError.BAD_PAYLOAD) from exc
+
+
+def _decode_cell(value):
+    if not (isinstance(value, (list, tuple)) and len(value) == 2):
+        raise ProtocolError(ProtocolError.BAD_PAYLOAD)
+    return Position(value[0], value[1])
+
+
+def _decode_offset(value):
+    if not (isinstance(value, (list, tuple)) and len(value) == 2):
+        raise ProtocolError(ProtocolError.BAD_PAYLOAD)
+    return tuple(value)
 
 
 def _decode_piece(data):
