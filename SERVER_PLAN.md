@@ -305,3 +305,168 @@ if ($LASTEXITCODE -ne 0) { Write-Host "PYLINT NOT CLEAN - do not push" -Foregrou
 
 After Step 2 passes, report back with the test summary. Do **not** start Step 3
 (`server/`, `client/`, WebSocket) — that spec comes after these two are reviewed.
+
+# STEP 3 — Minimal server + client over WebSocket
+
+Append this as the Step 3 section of SERVER_PLAN.md. The IRON RULES still apply.
+Two additions to them for this step:
+
+- **Line endings:** every new file must be saved with CRLF endings and a final
+  newline. (We lost time on mixed LF/CRLF; do not repeat it.)
+- **The graphical stack is frozen too:** do not edit `view/`, `input/`, `app.py`,
+  or the engine packages. The client *reuses* them. `app.py` stays as the local
+  offline front end and keeps working unchanged.
+Install the one dependency first: `pip install websockets`.
+
+---
+
+## What this step delivers
+
+Two processes on `localhost`, talking over a real WebSocket:
+
+- **`server.py`** (root) — owns the `GameEngine` + `GameClock`, runs the clock,
+  applies commands that arrive from clients, and broadcasts the full snapshot to
+  every connected client on every tick.
+- **`client.py`** (root) — opens the OpenCV window using the EXISTING graphical
+  stack, but instead of driving a local engine it: sends the player's clicks to
+  the server as `move`/`jump` messages, and draws whatever snapshot the server
+  last sent.
+Success looks like: run `python server.py` in one terminal, `python client.py` in
+two others; each client window shows the same board; a move clicked in either
+window is applied by the server and appears in BOTH windows.
+
+Colour assignment, login, rooms, ELO, disconnect handling are LATER steps. This
+step is only: the clock lives on the server, commands go up, snapshots come down,
+and the existing renderer draws them.
+
+---
+
+## The key idea (state it in the module docstrings)
+
+`app.py`'s loop is today: `clock.tick()` -> `engine.snapshot()` ->
+`renderer.render()`. Step 3 splits that loop across the wire:
+
+- The **server** keeps `clock.tick()` and `engine`, and after each tick sends
+  `protocol.state(engine.snapshot())` to all clients.
+- The **client** keeps `renderer.render()` and `Controller`, but its "engine" is
+  now a thin proxy: `Controller` calls `request_move`/`request_jump` on the proxy,
+  and the proxy serialises them with `protocol.move`/`protocol.jump` and sends
+  them to the server. The client never runs a real engine and never advances a
+  clock; it draws the latest snapshot it received.
+`Controller` depends only on the engine's command surface (`request_move`,
+`request_jump`), so swapping the real engine for the network proxy needs ZERO
+changes to `Controller`, `BoardMapper`, or `view/`. That clean seam is the whole
+reason this split is small.
+
+---
+
+## New files
+
+```
+server.py            # root: the async WebSocket server + game session
+client.py            # root: the OpenCV client that renders server snapshots
+common/net.py        # tiny shared helpers for framing over a websocket
+tests/unit/test_session.py
+tests/unit/test_net.py
+```
+
+Do NOT create matchmaking, rooms, accounts, or logging files yet.
+
+---
+
+### `common/net.py` — a testable session, no sockets inside
+
+The sockets live in `server.py`/`client.py`; the *logic* lives here so it can be
+unit-tested without a network. Put two pure pieces here:
+
+1. **`GameSession`** — owns one `GameEngine` for a match. No asyncio, no sockets.
+   - `__init__(self, engine, clock)` — takes the engine and a clock it can tick.
+   - `submit(self, message)` — takes a DECODED command dict (already through
+     `protocol.loads`), applies it to the engine: `move` -> `engine.request_move`,
+     `jump` -> `engine.request_jump`. Unknown/again-malformed message -> ignored
+     (return without raising; the caller already validated via `protocol.loads`,
+     this is defence in depth). It does NOT tick the clock.
+   - `advance(self, ms)` — tick the clock by `ms` (drives the engine's time).
+   - `snapshot(self)` — return `engine.snapshot()`.
+   - `game_over` property -> `engine.game_over`.
+   Why a class and not loose functions: the server holds exactly one of these per
+   game and it is the single place a command is turned into an engine call, so the
+   ordering guarantee (commands applied at tick boundaries) has one clear home.
+2. **`ClientProxy`** — the fake "engine" the client's `Controller` talks to.
+   - `__init__(self, send)` — `send` is a callable taking one already-built
+     message dict; the real client passes a function that puts the message on the
+     websocket. In tests you pass a list's `.append`.
+   - `request_move(self, src, dst)` -> `self._send(protocol.move(src, dst))`
+   - `request_jump(self, cell)` -> `self._send(protocol.jump(cell))`
+   That is the entire command surface `Controller` uses, so `ClientProxy` is a
+   drop-in stand-in for `GameEngine` on the client side.
+Both are pure and fully unit-tested. `GameClock` already ticks from a real clock;
+`GameSession.advance(ms)` must drive the engine deterministically instead, so in
+tests time is explicit. Check GameClock's real API first (`input/game_clock.py`)
+and, if it only reads the wall clock, have `GameSession` call `engine.wait(ms)`
+directly rather than through the clock — pick whichever keeps time explicit and
+test it. Do not invent a clock method that does not exist.
+
+### `tests/unit/test_session.py`
+
+- a `move` message submitted to a session moves the piece after `advance` past its
+  travel time (build a tiny board with `tests/helpers`, submit
+  `protocol.move(src, dst)` decoded, `advance` enough ms, assert the snapshot)
+- a `jump` message reaches the engine (a piece that can jump changes state)
+- an unknown message type is ignored, no raise, snapshot unchanged
+- `game_over` reflects the engine after a king capture
+- `ClientProxy.request_move` sends exactly `protocol.move(src, dst)` to its sink
+- `ClientProxy.request_jump` sends exactly `protocol.jump(cell)` to its sink
+### `server.py` — asyncio websockets glue (marked `# pragma: no cover`)
+
+Not unit-tested (a live socket, like the OpenCV window). Keep ALL logic in
+`GameSession`; this file is only plumbing:
+
+- one module-level `GameSession` for the single game (two-player colour handling
+  is the NEXT step; for now every client shares one session and may move any
+  piece).
+- keep a `set` of connected client websockets.
+- on each connect: add to the set; immediately send the current
+  `protocol.state(session.snapshot())` so the new window isn't blank.
+- on each message from a client: `protocol.loads` it inside a try/except
+  `ProtocolError` (log and ignore bad frames), then `session.submit(msg)`.
+- a background task ticks: every ~30 ms, `session.advance(30)`, then broadcast
+  `protocol.state(session.snapshot())` to all clients; drop clients whose send
+  fails. Stop nothing on game_over yet beyond what the engine already does.
+- run on `ws://localhost:8765`.
+Use `websockets.serve`. Keep the broadcast and the tick in one asyncio loop.
+
+### `client.py` — reuse the graphical stack (marked `# pragma: no cover`)
+
+Mirror `app.py`'s `build_game`, with two differences:
+
+1. the `Controller` is built with a `ClientProxy(send)` instead of the real
+   `GameEngine`, where `send` puts a message on the websocket.
+2. the frame loop does NOT tick a clock or call a local engine. It:
+   - keeps the latest snapshot received from the server (start with `None`;
+     draw nothing/"connecting" until the first arrives),
+   - on each frame draws that snapshot with the EXISTING `renderer` and `panel`,
+   - forwards mouse clicks to the `Controller` exactly as `app.py` does.
+   A background asyncio task receives messages, `protocol.loads` +
+   `protocol.decode_snapshot` on `state` messages, and stores the snapshot for the
+   draw loop. Bridge the asyncio receive loop and the OpenCV loop simply (a
+   thread or `asyncio` + `cv2.waitKey` poll) — keep it minimal and DO NOT block
+   the draw loop on the network (mentor: never freeze the graphics thread).
+`renderer.render(snapshot, elapsed_ms)` needs an elapsed-ms value for animation.
+The client has no clock of its own now, so use a local wall-clock stopwatch purely
+for animation timing (e.g. `time.time()` since start) — animation timing is
+cosmetic and independent of game time, which comes from the server. Note this
+choice in a comment.
+
+---
+
+## STOP after Step 3
+
+When `.\check.ps1 -Full` is green (session + proxy tests included, still 100% on
+the non-`pragma` code), and you have manually confirmed two client windows mirror
+each other through the server, commit:
+
+`feat: single-process server + minimal client over WebSocket (Step 3)`
+
+Then STOP. Do not start colour assignment / login (Step 4).
+ 
