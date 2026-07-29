@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: kungfu
+      POSTGRES_USER: kungfu
+      # A real deployment injects this secret at deploy time (e.g. from a
+      # secrets manager or CI variable) instead of committing a production
+      # password to source control; this default is for local development
+      # only.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+    volumes:
+      # A named volume, so the data survives `docker compose down` (it is
+      # only removed by `docker compose down -v`), and starting the stack
+      # again finds the same players table with the same rows.
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kungfu -d kungfu"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    ports:
+      - "8765:8765"
+    depends_on:
+      db:
+        # Postgres takes a few seconds to initialise. Without this
+        # condition, Compose starts the server as soon as the db
+        # container is merely running -- not yet accepting connections --
+        # so the server's very first connection attempt would fail.
+        # Waiting for "healthy" (the pg_isready check above) means the
+        # server only starts once Postgres can actually answer queries.
+        condition: service_healthy
+    environment:
+      # "db" is a hostname Compose resolves on the network it creates for
+      # this project -- exactly the "no service knows another's address"
+      # idea from the design doc, at the smallest possible scale: the
+      # server does not know or care that db.py's other end happens to be
+      # a container named "db" rather than a real host.
+      DATABASE_URL: postgresql://kungfu:${POSTGRES_PASSWORD:-devpassword}@db:5432/kungfu
+    restart: unless-stopped
+
+volumes:
+  db_data:

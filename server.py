@@ -20,6 +20,13 @@ covered by tests/unit/test_session.py.
 Two-player colour assignment, rooms, and login are later steps: for now every
 connected client shares the one session and may move any piece.
 
+At startup this also connects to Postgres (common.db) and makes sure the
+players schema exists. Accounts, login, and ELO are later steps -- Step A
+only proves the connection and puts the schema in place. Live games do not
+depend on the database, so a failed connection is logged and the server
+keeps serving games regardless; this is what makes that design-doc claim
+true rather than merely asserted.
+
 Run with:  python server.py
 """
 
@@ -28,12 +35,25 @@ import logging
 
 import websockets
 
-from common import net, protocol
+from common import db, net, protocol
 from engine.game import GameEngine
 from model.board import Board
 from model.config import Config
 
-_HOST = "localhost"
+# "localhost" binds only to the loopback interface *inside* whatever network
+# namespace the process runs in. On the host that is fine -- the interface a
+# local client connects to and the one the server binds to are the same
+# loopback. Inside a container it is not: Docker's published port
+# (docker-compose.yml `ports: ["8765:8765"]`) forwards an external
+# connection onto the container's real network interface, not its loopback,
+# so a server bound only to loopback never sees that connection -- the
+# client gets a TCP connection that opens and then closes with zero bytes,
+# exactly the failure this was. Binding to 0.0.0.0 listens on every
+# interface instead, including the one Docker forwards to. This is safe
+# here specifically because Docker only exposes to the host the ports this
+# project's own docker-compose.yml explicitly publishes -- 0.0.0.0 inside
+# the container is not the same exposure as 0.0.0.0 on a bare host.
+_HOST = "0.0.0.0"
 _PORT = 8765
 _TICK_MS = 30
 
@@ -102,7 +122,25 @@ async def _tick_loop(session, clients):  # pragma: no cover
         clients.difference_update(dead)
 
 
+def _connect_db():  # pragma: no cover
+    """Connect to Postgres and make sure the players schema exists. Live
+    games do not depend on the database (Server_Design.md section 10), so a
+    failed connection is logged and swallowed here rather than raised --
+    the caller starts the game server either way."""
+    try:
+        conn = db.connect()
+        db.ensure_schema(conn)
+        _log.info("connected to Postgres and verified the players schema")
+    except Exception:  # pylint: disable=broad-except
+        # Deliberate: any failure here (unset DATABASE_URL, unreachable
+        # host, auth failure) must not stop the game server from starting,
+        # per the design doc's claim that live games do not depend on the
+        # database.
+        _log.exception("could not reach Postgres; continuing without it")
+
+
 async def _main():  # pragma: no cover
+    _connect_db()
     session = _build_session()
     clients = set()
 

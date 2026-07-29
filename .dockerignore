@@ -1,0 +1,14 @@
+# Keeps the build context (and therefore the image) small, and more
+# importantly keeps rebuild times short: none of these change when the
+# server's actual source does, so excluding them stops unrelated edits
+# (docs, test files, coverage reports) from invalidating Docker's build
+# cache.
+.git
+__pycache__
+.pytest_cache
+tests
+assets
+docs
+*.md
+htmlcov
+.coverage

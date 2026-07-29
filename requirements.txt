@@ -1,0 +1,18 @@
+# Pinned to the versions installed on the host (checked with `pip show`
+# rather than guessed), so the container behaves identically to local
+# development.
+websockets==16.1.1
+numpy==2.2.6
+# OpenCV is pinned here per the design doc's plan for this step, on the
+# assumption that the engine packages need it transitively. Checked that
+# assumption against the actual import graph the server uses (server.py,
+# common/, engine/, model/, rules/, realtime/, boardio/, input/): none of
+# them import cv2 -- only view/, app.py and client.py do, and the server
+# image copies none of those. So opencv-python is not currently needed by
+# the server; it stays in this shared file for this step regardless, and
+# splitting server/client requirements into two files is the later cleanup
+# the design doc already anticipates, not part of this step.
+opencv-python==5.0.0.93
+# psycopg 3 is the current PostgreSQL driver for Python; the [binary]
+# extra ships a precompiled build so the image needs no C toolchain.
+psycopg[binary]==3.3.4
