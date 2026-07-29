@@ -48,6 +48,23 @@ def test_connect_raises_a_clear_error_when_database_url_is_absent(monkeypatch):
         db.connect()
 
 
+def test_connect_passes_an_explicit_url_through_to_the_underlying_connect(monkeypatch):
+    # The actual psycopg.connect() call lives in the pragma'd _connect() --
+    # this stubs that one line out rather than reaching a real Postgres, per
+    # the house rule of not testing anything that needs a live database.
+    seen = []
+    monkeypatch.setattr(db, "_connect", lambda url: seen.append(url) or "a connection")
+    result = db.connect(url="postgresql://example/db")
+    assert seen == ["postgresql://example/db"]
+    assert result == "a connection"
+
+
+def test_connect_falls_back_to_the_database_url_env_var(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://from-env/db")
+    monkeypatch.setattr(db, "_connect", lambda url: url)
+    assert db.connect() == "postgresql://from-env/db"
+
+
 def test_ensure_schema_issues_one_statement_and_commits():
     conn = _FakeConnection()
     db.ensure_schema(conn)
