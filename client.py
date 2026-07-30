@@ -64,12 +64,19 @@ _SERVER_URI = "ws://localhost:8765"
 _CONFIG = Config(cell_size=98, board_offset=(13, 15))
 
 
-class _ServerLink:  # pragma: no cover
+class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attributes
     """Owns the websocket connection on its own thread and its own asyncio
     event loop, so the OpenCV draw loop never awaits anything.
 
     Exposes the latest decoded snapshot (None until the first one arrives)
     and a synchronous `send`, which is exactly the callable ClientProxy needs.
+
+    All eight attributes are load-bearing: the connection's identity (uri,
+    username), its asyncio machinery (loop, websocket, thread), and the
+    shared state the network thread writes and the OpenCV thread reads
+    (snapshot, color, and the lock guarding both). None is redundant with
+    another, so splitting this further would not reduce complexity, only
+    move it behind another name.
     """
 
     def __init__(self, uri, username):
@@ -83,9 +90,12 @@ class _ServerLink:  # pragma: no cover
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
+        """Start the background thread that owns the connection."""
         self._thread.start()
 
     def snapshot(self):
+        """-> the latest decoded GameSnapshot, or None before the first
+        `state` message has arrived."""
         with self._lock:
             return self._snapshot
 
@@ -210,6 +220,9 @@ class _SnapshotBoard:  # pragma: no cover
         return None
 
     def in_bounds(self, row, col):
+        """-> whether (row, col) is on the board, per the latest snapshot's
+        own dimensions -- False before the first snapshot arrives, since
+        there is nothing to click yet either."""
         snapshot = self._link.snapshot()
         if snapshot is None:
             return False
@@ -240,7 +253,7 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
 
     board_image = Img().read(_BOARD_PNG)
-    image_h, image_w = board_image.img.shape[:2]
+    _image_h, image_w = board_image.img.shape[:2]
 
     sprites = SpriteLibrary(_PIECES, cell_size=(_CONFIG.cell_size, _CONFIG.cell_size))
     animations = AnimationSet(_PIECES)
@@ -257,6 +270,12 @@ def run():  # pragma: no cover
     open the window and run the frame loop until the server reports the
     game over or Esc/Q is pressed. Each frame draws whatever snapshot the
     network thread last received; nothing is drawn before the first one."""
+    # cv2 is a compiled C extension, so pylint cannot introspect its
+    # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
+    # all exist and work at runtime (app.py, frozen and untouched, uses the
+    # same members the same way). Every no-member warning from here to the
+    # end of this function is that false positive, not a real one.
+    # pylint: disable=no-member
     username = _prompt_username()
     controller, renderer, link, observer, panel = build_client(username=username)
     link.start()
