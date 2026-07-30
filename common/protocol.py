@@ -28,6 +28,7 @@ from model.snapshot import GameSnapshot, PieceView
 # --- message type names -------------------------------------------------
 
 # client -> server
+LOGIN = "login"
 MOVE = "move"
 JUMP = "jump"
 PLAY = "play"
@@ -48,6 +49,7 @@ ERROR = "error"
 
 # type -> field names a message of that type must carry.
 _REQUIRED_FIELDS = {
+    LOGIN: ("username",),
     MOVE: ("src", "dst"),
     JUMP: ("cell",),
     PLAY: (),
@@ -124,6 +126,19 @@ def _validate_cell(value):
 
 
 # --- builders: client -> server --------------------------------------------
+
+def login(username):
+    """`username` is the free-text name the player typed at the client's shell
+    prompt before the window opened (slide 3: login in a shell, not the GUI).
+    Sent once, as the very first message on a new connection -- before any
+    `move`/`jump` -- so the server can log which username took which color.
+    There is no password and no persistence here: this is presentation only
+    (slide 3); the account system is a later step. The client only checks
+    non-emptiness before sending, so `username` is never `""`, but the server
+    does not re-validate it -- a malformed or missing `username` fails at
+    `loads()`, same as any other required field."""
+    return {"type": LOGIN, "username": username}
+
 
 def move(src, dst):
     """`src` and `dst` are each a `(row, col)` pair identifying the piece's current

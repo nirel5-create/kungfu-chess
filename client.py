@@ -24,6 +24,14 @@ now lives on the server, inside the snapshot itself -- so this uses a plain
 wall-clock stopwatch (time.time() since the window opened) for animation
 timing only; it is cosmetic and never used to advance the game.
 
+Before the window opens, this prompts for a username on the terminal (slide
+3: "Login with username -- do it in a shell, not via GUI") and sends it to
+the server as the very first message on the connection, so the server can
+log which username took which color. There is no password and no
+persistence: this is presentation only (slide 3); the account system is a
+later step. Which color this client is assigned is decided by the server
+from connection order, not from anything this file sends or asserts.
+
 Run with:  python client.py
 """
 
@@ -64,11 +72,13 @@ class _ServerLink:  # pragma: no cover
     and a synchronous `send`, which is exactly the callable ClientProxy needs.
     """
 
-    def __init__(self, uri):
+    def __init__(self, uri, username):
         self._uri = uri
+        self._username = username
         self._loop = asyncio.new_event_loop()
         self._websocket = None
         self._snapshot = None
+        self._color = None  # None until the server's `assigned` message arrives
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -78,6 +88,13 @@ class _ServerLink:  # pragma: no cover
     def snapshot(self):
         with self._lock:
             return self._snapshot
+
+    def color(self):
+        """-> "w" / "b" / "viewer" once the server's `assigned` message has
+        arrived, or None before that -- guarded by the same lock as
+        `snapshot`, since the network thread writes both."""
+        with self._lock:
+            return self._color
 
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
@@ -96,6 +113,14 @@ class _ServerLink:  # pragma: no cover
     async def _receive_loop(self):
         async with websockets.connect(self._uri) as websocket:
             self._websocket = websocket
+            # Sent here, inside the coroutine that just opened the socket,
+            # rather than via the public `send` after start() returns: `send`
+            # silently drops a message until `_websocket` is set (see below),
+            # so sending the login from outside this loop would race the
+            # connection actually being up. Sending it here, as the first
+            # thing done once the socket is open, makes it always the first
+            # message on the wire with no race.
+            await websocket.send(protocol.dumps(protocol.login(self._username)))
             async for raw in websocket:
                 try:
                     message = protocol.loads(raw)
@@ -105,6 +130,9 @@ class _ServerLink:  # pragma: no cover
                     snapshot = protocol.decode_snapshot(message["snapshot"])
                     with self._lock:
                         self._snapshot = snapshot
+                elif message["type"] == protocol.ASSIGNED:
+                    with self._lock:
+                        self._color = message["color"]
 
 
 class _SnapshotBoard:  # pragma: no cover
@@ -139,18 +167,46 @@ class _SnapshotBoard:  # pragma: no cover
     authority on legality -- will simply refuse if it turns out to be
     illegal. Nothing here can corrupt game state, only at worst pick a
     slightly stale selection for one click.
+
+    piece_at also hides any piece that does not belong to this client's own
+    assigned color (see piece_at's docstring for why that alone is enough to
+    stop the opponent's pieces from lighting up on click, with zero changes
+    to the frozen Controller).
     """
 
     def __init__(self, link):
         self._link = link
 
     def piece_at(self, row, col):
+        """-> the token at (row, col), or None if there is nothing here THIS
+        CLIENT may select -- which includes a cell that is merely empty, a
+        cell holding the opponent's piece, and every cell at all if this
+        client is a "viewer" or has no assigned color yet.
+
+        Controller (frozen) only ever calls piece_at to decide selection: no
+        piece there means nothing to select. So hiding an opponent's piece
+        behind None makes it look exactly like an empty cell to Controller,
+        which is enough on its own to stop it from ever being selected --
+        Controller itself needed no change. Captures still work: clicking a
+        cell that reads as "empty" while a piece is already selected is
+        precisely Controller's request_move branch, so a capture of a
+        hidden opponent piece is still sent to the server as a move, which
+        the server -- the actual authority on legality -- applies or
+        refuses. Rendering is unaffected by any of this: Renderer paints
+        straight from the snapshot, never through this view, so the
+        opponent's pieces are always drawn; only click-driven selection is
+        blind to them.
+
+        Before the server's `assigned` message arrives, this client owns no
+        color yet, so every cell reads as empty rather than guessing -- the
+        same treatment as being assigned "viewer"."""
         snapshot = self._link.snapshot()
-        if snapshot is None:
+        color = self._link.color()
+        if snapshot is None or color is None or color == "viewer":
             return None
         for piece in snapshot.pieces:
             if piece.row == row and piece.col == col:
-                return f"{piece.color}{piece.kind}"
+                return f"{piece.color}{piece.kind}" if piece.color == color else None
         return None
 
     def in_bounds(self, row, col):
@@ -160,12 +216,25 @@ class _SnapshotBoard:  # pragma: no cover
         return 0 <= row < snapshot.board_height and 0 <= col < snapshot.board_width
 
 
-def build_client(uri=_SERVER_URI):  # pragma: no cover
+def _prompt_username():  # pragma: no cover
+    """Read a non-empty username from the terminal, before the window opens
+    (slide 3: login in a shell, not the GUI). Empty input (just pressing
+    Enter) re-prompts rather than being sent -- there is no server-side
+    validation of usernames beyond the field simply being present (no
+    accounts, no password: presentation only, per slide 3), so this is the
+    only check there is."""
+    while True:
+        username = input("Username: ").strip()
+        if username:
+            return username
+
+
+def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover
     """Compose the whole graphical stack and return the parts run() drives.
     Mirrors app.py's build_game(), except the engine is a ClientProxy, the
     board is a _SnapshotBoard instead of a model.Board, and there is a
     ServerLink instead of a GameClock."""
-    link = _ServerLink(uri)
+    link = _ServerLink(uri, username)
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
@@ -184,10 +253,12 @@ def build_client(uri=_SERVER_URI):  # pragma: no cover
 
 
 def run():  # pragma: no cover
-    """Open the window and run the frame loop until the server reports the
+    """Prompt for a username on the terminal (slide 3's shell login), then
+    open the window and run the frame loop until the server reports the
     game over or Esc/Q is pressed. Each frame draws whatever snapshot the
     network thread last received; nothing is drawn before the first one."""
-    controller, renderer, link, observer, panel = build_client()
+    username = _prompt_username()
+    controller, renderer, link, observer, panel = build_client(username=username)
     link.start()
     start_time = time.time()
 

@@ -230,3 +230,20 @@ def test_state_message_with_garbage_snapshot_is_caught_not_crashed():
         protocol.decode_snapshot(msg["snapshot"])
     assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
 
+
+# --- login (Step 4) -----------------------------------------------------
+
+def test_login_builder_produces_a_dict_whose_type_matches_its_constant():
+    assert protocol.login("nirel")["type"] == protocol.LOGIN
+
+
+def test_login_round_trips_through_dumps_and_loads():
+    message = protocol.login("nirel")
+    assert protocol.loads(protocol.dumps(message)) == message
+
+
+def test_login_missing_username_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.LOGIN}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+

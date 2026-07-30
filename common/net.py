@@ -18,9 +18,25 @@ no `ms` argument, it measures time.monotonic() itself. That makes it unusable
 here: GameSession.advance(ms) must move the engine by a caller-chosen amount so
 tests (and the server's fixed ~30 ms tick) get deterministic, explicit time.
 So GameSession calls engine.wait(ms) directly and never holds a GameClock.
+
+Ownership -- who is allowed to move a given piece -- is enforced here, in
+GameSession.submit, not in GameEngine and not on the client. It is not a
+chess rule: the engine knows what is *legal*, not who is *allowed to ask*,
+so checking color there would break app.py, where local play depends on one
+person moving both sides. It is also not something a client may assert:
+color never travels inside a `move`/`jump` message, because a client that
+could put "color": "b" in a request could move the opponent's pieces. The
+server knows who you are from the connection (server.py assigns a color when
+a websocket connects), not from what a client claims -- the same principle
+as Server_Design.md: the client does not decide the rules, and neither does
+the gateway. So responsibility splits: server.py knows WHO you are
+(connection -> color), GameSession enforces the rule (does this piece belong
+to that color?), and GameEngine decides legality, unchanged and frozen.
 """
 
 from common import protocol
+
+ANY_COLOR = "any"   # local play: ownership is not enforced
 
 
 class GameSession:
@@ -30,22 +46,66 @@ class GameSession:
     def __init__(self, engine):
         self._engine = engine
 
-    def submit(self, message):
+    def submit(self, message, color=ANY_COLOR):
         """Apply one already-decoded command dict (already validated by
-        protocol.loads) to the engine. A `move` calls request_move, a `jump`
-        calls request_jump; any other type -- unknown, or a leftover from a
-        message kind this session does not act on -- is ignored rather than
-        raised, since the caller has already validated the wire shape and this
-        is only defence in depth. Does not advance time.
+        protocol.loads) to the engine, after checking that `color` owns the
+        piece the message names. A `move` calls request_move, a `jump` calls
+        request_jump; any other type -- unknown, or a leftover from a message
+        kind this session does not act on -- is ignored rather than raised,
+        since the caller has already validated the wire shape and this is
+        only defence in depth. Does not advance time.
+
+        `color` defaults to ANY_COLOR for two deliberate reasons:
+        1. Local play (app.py, and any single-process use) is a supported
+           mode where one person moves both sides, so "no owner" must be
+           expressible.
+        2. The existing tests in tests/unit/test_session.py call
+           submit(message) with a single argument; the default keeps them
+           passing untouched, per IRON RULE 1.
+
+        See _may_act for the four possible values of `color` and what each
+        is allowed to do. A refused command is silently dropped, never
+        raised -- the same treatment as an unknown message type above.
 
         Cells arrive as JSON lists, but the engine uses them as dict/set keys
         internally (RealTimeArbiter tracks motions by cell), so each list is
         converted to a tuple here before it reaches the engine."""
         message_type = message.get("type")
         if message_type == protocol.MOVE:
-            self._engine.request_move(tuple(message["src"]), tuple(message["dst"]))
+            if self._may_act(color, message["src"]):
+                self._engine.request_move(tuple(message["src"]), tuple(message["dst"]))
         elif message_type == protocol.JUMP:
-            self._engine.request_jump(tuple(message["cell"]))
+            if self._may_act(color, message["cell"]):
+                self._engine.request_jump(tuple(message["cell"]))
+
+    def _may_act(self, color, cell):
+        """Whether `color` may act on the piece sitting at `cell` (a JSON
+        list; _piece_color_at wants a tuple, matching how the engine itself
+        keys motions by cell).
+
+        - ANY_COLOR: always -- local play, ownership is not enforced.
+        - "viewer": never -- a viewer may watch but not move anything.
+        - "w" / "b": only if that color owns the piece at `cell`. An empty
+          cell has no owner, so this is also False -- there is nothing to
+          move, and the engine would have refused it anyway."""
+        if color == ANY_COLOR:
+            return True
+        if color == "viewer":
+            return False
+        return self._piece_color_at(tuple(cell)) == color
+
+    def _piece_color_at(self, cell):
+        """The color of the piece at `cell`, or None if the cell is empty.
+        The engine has no "piece at cell" accessor (it is frozen), so this
+        walks snapshot().pieces instead -- the same lookup client.py's
+        _SnapshotBoard.piece_at does against a snapshot on the client side:
+        one approach to "what is on this cell", used consistently rather
+        than two."""
+        row, col = cell
+        for piece in self._engine.snapshot().pieces:
+            if piece.row == row and piece.col == col:
+                return piece.color
+        return None
 
     def advance(self, ms):
         """Move the engine's simulated clock forward by exactly `ms`."""
