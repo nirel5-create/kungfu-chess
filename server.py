@@ -51,7 +51,7 @@ import websockets
 
 from common import db, net, protocol
 from common.bus import Bus
-from common.registry import GameRegistry
+from common.registry import AlreadyConnectedError, GameRegistry
 from engine.game import GameEngine
 from model.board import Board
 from model.config import Config
@@ -140,10 +140,21 @@ async def _handle_client(websocket, registry, clients):  # pragma: no cover
     first `state` so the client knows its role from the outset, register
     the connection, then apply every command it sends -- checked against
     its seat by GameSession.submit -- until it disconnects, at which point
-    it leaves the game (its seat stays held; see GameRegistry.leave)."""
+    it leaves the game (its seat stays held; see GameRegistry.leave).
+
+    A username already connected to the game it would join gets refused
+    outright (GameRegistry.AlreadyConnectedError) rather than seated as a
+    silent "viewer" -- this connection is closed right away, before it is
+    ever added to `clients` or sent anything but the `error`, so it never
+    reaches the command loop or GameRegistry.leave below."""
     username = await _read_username(websocket)
     game_id = _find_or_create_game(registry)
-    color = registry.join(game_id, username)
+    try:
+        color = registry.join(game_id, username)
+    except AlreadyConnectedError:
+        await websocket.send(protocol.dumps(protocol.error("already_connected")))
+        await websocket.close()
+        return
     clients[websocket] = (game_id, username)
     _log.info("%s joined game %s as %s", username, game_id, color)
     try:

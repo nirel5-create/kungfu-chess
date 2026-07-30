@@ -23,9 +23,9 @@ class _Recorder:
         return lambda payload: self.received[topic].append(payload)
 
 
-def _piece(kind, color, row, col):
+def _piece(kind, color, row, col, state="idle"):
     return PieceView(kind=kind, color=color, row=row, col=col,
-                      x=float(col), y=float(row), state="idle", rest_progress=0.0)
+                      x=float(col), y=float(row), state=state, rest_progress=0.0)
 
 
 def _snap(pieces, game_over=False):
@@ -109,12 +109,44 @@ def test_a_capture_also_publishes_score_update():
     assert rec.received[topics.SCORE_UPDATE] == [{}]
 
 
-def test_a_piece_changing_kind_at_the_same_cell_publishes_sound_promotion():
+def test_a_pawn_arriving_promoted_at_a_new_cell_publishes_sound_promotion():
+    # The real engine promotes a pawn AT ITS DESTINATION cell, so cell and
+    # kind change together in one transition -- there is no snapshot pair
+    # where the SAME cell shows both the old and the new kind. This is the
+    # scenario that was silently never firing before the fix.
     bus = Bus()
     rec = _Recorder(bus)
     source = GameEventSource(bus)
-    source.on_snapshot(_snap([_piece("P", "w", 0, 0)]))
+    source.on_snapshot(_snap([_piece("P", "w", 1, 0)]))
     source.on_snapshot(_snap([_piece("Q", "w", 0, 0)]))
+    assert rec.received[topics.SOUND] == [{"name": "promotion"}]
+
+
+def test_promotion_uses_the_injected_promotions_mapping_not_a_hardcoded_one():
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus, promotions={"wN": "wB"})  # an unusual variant
+    source.on_snapshot(_snap([_piece("N", "w", 1, 0)]))
+    source.on_snapshot(_snap([_piece("B", "w", 0, 0)]))
+    assert rec.received[topics.SOUND] == [{"name": "promotion"}]
+
+
+def test_promotion_takes_precedence_over_move():
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus)
+    # An unrelated piece also moves in the same frame as the promotion.
+    source.on_snapshot(_snap([_piece("P", "w", 1, 0), _piece("R", "w", 5, 5)]))
+    source.on_snapshot(_snap([_piece("Q", "w", 0, 0), _piece("R", "w", 5, 6)]))
+    assert rec.received[topics.SOUND] == [{"name": "promotion"}]
+
+
+def test_promotion_takes_precedence_over_capture_when_a_promoting_pawn_captures_on_arrival():
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus)
+    source.on_snapshot(_snap([_piece("P", "w", 1, 0), _piece("R", "b", 0, 0)]))
+    source.on_snapshot(_snap([_piece("Q", "w", 0, 0)]))  # captured the rook, promoted
     assert rec.received[topics.SOUND] == [{"name": "promotion"}]
 
 
@@ -147,6 +179,45 @@ def test_game_start_is_published_only_once_even_after_many_snapshots():
     for i in range(5):
         source.on_snapshot(_snap([_piece("R", "w", 0, i)]))
     assert len(rec.received[topics.GAME_START]) == 1
+
+
+def test_a_piece_transitioning_into_jumping_publishes_sound_jump():
+    # A jump never changes cell -- only state (see model.snapshot's
+    # STATE_JUMPING) -- so this is the scenario a cell-based detector
+    # like _moved/_captured is structurally blind to.
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus)
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0)]))
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0, state="jumping")]))
+    assert rec.received[topics.SOUND] == [{"name": "jump"}]
+    # A jump does not move or capture anything, so neither of those fires.
+    assert rec.received[topics.MOVE_LOG] == []
+    assert rec.received[topics.SCORE_UPDATE] == []
+
+
+def test_jumping_state_persisting_over_several_snapshots_publishes_jump_once():
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus)
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0)]))
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0, state="jumping")]))
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0, state="jumping")]))
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0, state="jumping")]))
+    assert rec.received[topics.SOUND] == [{"name": "jump"}]
+
+
+def test_a_frame_with_a_jump_and_an_unrelated_move_publishes_only_move():
+    # Pieces act independently in real time, so a jump on one piece can
+    # land in the same frame as an unrelated piece's move -- the move is
+    # the more informative of the two (see on_snapshot's precedence).
+    bus = Bus()
+    rec = _Recorder(bus)
+    source = GameEventSource(bus)
+    source.on_snapshot(_snap([_piece("R", "w", 0, 0), _piece("N", "w", 2, 2)]))
+    source.on_snapshot(_snap(
+        [_piece("R", "w", 0, 0, state="jumping"), _piece("N", "w", 2, 1)]))
+    assert rec.received[topics.SOUND] == [{"name": "move"}]
 
 
 def test_a_frame_with_both_a_capture_and_a_move_publishes_only_capture():

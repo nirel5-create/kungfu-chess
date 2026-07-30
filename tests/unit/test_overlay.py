@@ -1,13 +1,17 @@
+import numpy as np
+
 from client.overlay import BannerOverlay
-
-
-class _FakeImg:
-    shape = (100, 100, 4)
 
 
 class _FakeFrame:
     def __init__(self):
-        self.img = _FakeImg()
+        # A real (small) array, not just an object with a `.shape` --
+        # draw() now writes the backing rectangle straight onto frame.img
+        # with cv2.rectangle (see overlay.py's module docstring), which
+        # needs an actual mutable buffer to draw into, not merely
+        # something that reports a shape. put_text stays a pure spy below:
+        # only the rectangle touches real pixels.
+        self.img = np.zeros((100, 100, 4), dtype=np.uint8)
         self.calls = []
 
     def put_text(self, *args, **kwargs):
@@ -52,3 +56,18 @@ def test_draw_calls_put_text_when_a_banner_is_showing():
     frame = _FakeFrame()
     overlay.draw(frame, 0)
     assert len(frame.calls) == 1
+
+
+def test_draw_paints_a_dark_backing_rectangle_behind_the_text():
+    # Readability fix: white banner text over a light board square used to
+    # be unreadable. The backing is drawn straight onto frame.img (see
+    # overlay.py's module docstring), not through put_text, so it would
+    # not show up in frame.calls at all -- checked on the pixels instead.
+    overlay = BannerOverlay()
+    overlay.on_game_start({})
+    frame = _FakeFrame()
+    overlay.draw(frame, 0)
+    assert frame.img.any()  # started all-zero; the backing changed pixels
+    center = frame.img[50, 20]  # inside the rectangle, left of the text glyphs
+    assert tuple(center[:3]) == (0, 0, 0)
+    assert center[3] == 255

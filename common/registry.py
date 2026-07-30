@@ -44,6 +44,18 @@ _DEFAULT_KING_TYPE = "K"
 _SEAT_COLORS = ("w", "b")
 
 
+class AlreadyConnectedError(Exception):
+    """Raised by join() when `username` already has a LIVE connection to
+    `game_id` -- a second, simultaneous connection under the same name,
+    not a reconnect. This used to be handled by silently seating the
+    second connection as "viewer": that stopped the second window from
+    controlling the first one's pieces, but gave the player at that second
+    window no explanation -- they would just find they could not move
+    anything and have to guess why. Raising a named exception lets the
+    caller (server.py) tell them instead: a refusal the player can read
+    beats a silent demotion they must deduce."""
+
+
 class _Game:  # pylint: disable=too-few-public-methods
     # A plain mutable data holder, private to this module -- callers only
     # ever see a game_id, never a _Game, so it needs no public API of its
@@ -103,17 +115,38 @@ class GameRegistry:
         """-> the color seated for `username` in `game_id`: "w", "b", or
         "viewer". Raises KeyError for an unknown game_id.
 
-        A username that already has a seat gets that same seat back --
-        this is what makes reconnecting work, since leave() below does not
-        erase the seat. Only the SEAT is made stable here; a *timed*
-        reconnect window (a grace period before the seat is forfeited) is a
-        later step. This step deliberately only guarantees the seat does
-        not silently vanish on disconnect, nothing about how long it waits.
+        A username that already has a seat AND IS NOT CURRENTLY CONNECTED
+        gets that same seat back -- this is what makes reconnecting work,
+        since leave() below does not erase the seat. Only the SEAT is made
+        stable here; a *timed* reconnect window (a grace period before the
+        seat is forfeited) is a later step. This step deliberately only
+        guarantees the seat does not silently vanish on disconnect, nothing
+        about how long it waits.
+
+        A username that already has a seat AND IS CURRENTLY CONNECTED is a
+        second, simultaneous connection under the same name, not a
+        reconnect -- "I am coming back" and "I am already connected
+        elsewhere" look identical if only `seats` is consulted, but
+        `connected` (already tracked, for exactly this) tells them apart.
+        Raises AlreadyConnectedError for that case rather than seating the
+        second connection as "viewer": the earlier "viewer" behaviour did
+        stop the second window from controlling the first one's pieces, but
+        left the player with nothing but an unresponsive board to explain
+        why. The original seat is left untouched either way -- only how
+        the second connection is told about it changes. (This is scoped to
+        exactly that case -- `connected` records USERNAMES, not a count of
+        live connections per username, so if the original connection then
+        leaves while a rejected second attempt is somehow still retrying, a
+        later join looks like a fresh reconnect again. Closing that gap
+        needs counting connections, not just tracking who has ever joined;
+        not needed for the bug this fixes.)
 
         Otherwise, the first of "w"/"b" not already held by some username
         in this game is assigned; if both are held, the seat is "viewer"."""
         game = self._games[game_id]
         if username in game.seats:
+            if username in game.connected:
+                raise AlreadyConnectedError(username)
             game.connected.add(username)
             return game.seats[username]
         color = self._next_open_seat(game)

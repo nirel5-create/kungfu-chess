@@ -44,3 +44,41 @@ def test_illegal_move_is_deliberately_not_in_the_default_names_mapping():
     # The server never rejects an illegal command, so the client has no
     # event to trigger this sound from -- see client/sound.py's comment.
     assert "illegal_move" not in _DEFAULT_NAMES
+
+
+def test_a_fresh_player_is_not_muted():
+    player = SoundPlayer("unused", play=lambda path: None)
+    assert player.muted is False
+
+
+def test_toggle_mute_flips_the_state_and_returns_it(tmp_path):
+    player = SoundPlayer(str(tmp_path), play=lambda path: None)
+    assert player.toggle_mute() is True
+    assert player.muted is True
+    assert player.toggle_mute() is False
+    assert player.muted is False
+
+
+def test_on_sound_does_not_call_play_while_muted(tmp_path):
+    (tmp_path / "move.wav").write_bytes(b"")
+    calls = []
+    player = SoundPlayer(str(tmp_path), play=calls.append, names={"move": "move.wav"})
+    player.toggle_mute()
+    player.on_sound({"name": "move"})
+    assert calls == []
+
+
+def test_on_sound_plays_again_after_unmuting(tmp_path):
+    (tmp_path / "move.wav").write_bytes(b"")
+    calls = []
+    player = SoundPlayer(str(tmp_path), play=calls.append, names={"move": "move.wav"})
+    player.toggle_mute()    # mute
+    player.toggle_mute()    # unmute
+    player.on_sound({"name": "move"})
+    assert calls == [os.path.join(str(tmp_path), "move.wav")]
+
+
+def test_jump_reuses_move_wav_in_the_default_names_mapping():
+    # There is no dedicated jump.wav yet -- see _DEFAULT_NAMES's comment.
+    # Dropping one in and repointing this entry is the whole later change.
+    assert _DEFAULT_NAMES["jump"] == "move.wav"

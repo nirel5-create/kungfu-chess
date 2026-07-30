@@ -17,6 +17,10 @@ _DEFAULT_NAMES = {
     "capture": "capture.wav",
     "promotion": "promotion.wav",
     "game_over": "game_over.wav",
+    # Reuses move.wav: there is no dedicated jump.wav yet. Dropping one into
+    # assets/sounds and pointing this entry at it is the entire change
+    # needed later -- nothing in this file or GameEventSource has to move.
+    "jump": "move.wav",
     # assets/sounds/illegal_move.wav exists but is deliberately NOT mapped
     # here: the server silently ignores an illegal command and sends no
     # rejection (common.net.GameSession.submit just drops it -- see its
@@ -28,44 +32,80 @@ _DEFAULT_NAMES = {
 }
 
 
-def _play_with_winsound(path):  # pragma: no cover -- needs Windows audio hardware
-    # Imported locally, not at module top, so this module (and its pure
-    # logic below) can be imported and tested on the non-Windows machine
-    # tests run on -- the same reason view/sprite_library.py imports cv2
-    # locally rather than at module scope.
-    import winsound  # pylint: disable=import-outside-toplevel
-    # SND_ASYNC matters twice: it does not block the draw loop, and
-    # starting a new sound replaces the one still playing. The provided
-    # files are ~2s long and moves happen about every 2s, so without
-    # replacement they would pile up.
-    winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+class _PygamePlayer:  # pragma: no cover -- needs real audio hardware, pylint: disable=too-few-public-methods
+    """The real playback callable used when no `play` is injected. Callable,
+    so it slots directly into SoundPlayer's injected `play` seam --
+    SoundPlayer neither knows nor cares that this one, unlike a test's
+    `play`, holds state.
+
+    Replaces winsound.PlaySound, which opened and closed the OS audio
+    device and re-read the file from disk on EVERY call -- Windows puts the
+    device back to sleep between calls, so that open cost was paid again
+    every time, producing an inconsistent delay (observed anywhere from
+    immediate to ~1.5s) with no way to fix it from the calling side; a
+    one-off warm-up sound could not help either, since the device just
+    sleeps again after it. pygame.mixer instead opens the device ONCE, in
+    __init__ below, and keeps it open; every sound named in `names` is
+    decoded into memory as a pygame.mixer.Sound in that same __init__, so a
+    later play() call only has to start a buffer already in RAM. Both of
+    those happen once, at construction (client startup), never per call."""
+
+    def __init__(self, folder, names):
+        import pygame  # pylint: disable=import-outside-toplevel
+        pygame.mixer.init()
+        self._sounds = {}
+        for filename in names.values():
+            path = os.path.join(folder, filename)
+            if os.path.isfile(path):
+                self._sounds.setdefault(path, pygame.mixer.Sound(path))
+
+    def __call__(self, path):
+        sound = self._sounds.get(path)
+        if sound is not None:
+            sound.play()
 
 
-class SoundPlayer:  # pylint: disable=too-few-public-methods
-    # A bus subscriber is meant to have exactly one public entry point --
-    # the handler it is subscribed with -- so one public method is the
-    # design, not a gap.
+class SoundPlayer:
     """Subscribe on_sound to topics.SOUND.
 
-    `play` is injected, defaulting to the real Windows player -- the same
-    pattern as ClientProxy(send), GameRegistry(make_session) and
+    `play` is injected, defaulting to the real pygame-backed player -- the
+    same pattern as ClientProxy(send), GameRegistry(make_session) and
     db.connect(connector=). That is what makes this testable with no audio
     hardware, and it is why there is no monkeypatching anywhere in this
-    project."""
+    project.
+
+    Mute lives here, not in the draw loop and not in GameEventSource:
+    muting is "stop playing sounds", not "stop deciding what the sounds
+    would be" -- GameEventSource keeps publishing regardless of whether
+    anyone is listening, which is what a bus is for."""
 
     def __init__(self, folder, play=None, names=None):
         """folder -- directory the sound files live in (assets/sounds).
-        play -- callable(path); defaults to the real Windows player.
-        names -- {sound name: filename}; defaults to the four wired sounds."""
+        play -- callable(path); defaults to the real pygame-backed player.
+        names -- {sound name: filename}; defaults to the five wired sounds."""
         self._folder = folder
-        self._play = play if play is not None else _play_with_winsound
         self._names = names if names is not None else _DEFAULT_NAMES
+        self._play = play if play is not None else _PygamePlayer(folder, self._names)
+        self._muted = False
+
+    @property
+    def muted(self):
+        """-> whether sound is currently muted."""
+        return self._muted
+
+    def toggle_mute(self):
+        """Flip muted on/off. -> the new state, so a caller (e.g. a key
+        handler) can show it without a separate read."""
+        self._muted = not self._muted
+        return self._muted
 
     def on_sound(self, payload):
-        """Play the sound named by payload["name"]. An unknown name, a
-        missing file, or a payload without a "name" key is logged and
-        ignored, never raised -- a missing sound must not take down the
-        game."""
+        """Play the sound named by payload["name"], unless muted. An
+        unknown name, a missing file, or a payload without a "name" key is
+        logged and ignored, never raised -- a missing sound must not take
+        down the game."""
+        if self._muted:
+            return
         name = payload.get("name")
         if name is None:
             return

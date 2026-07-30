@@ -48,6 +48,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 import websockets
 
 from client.events import GameEventSource
@@ -99,6 +100,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._websocket = None
         self._snapshot = None
         self._color = None  # None until the server's `assigned` message arrives
+        self._error = None  # None unless the server sent an `error` message
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -118,6 +120,16 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         `snapshot`, since the network thread writes both."""
         with self._lock:
             return self._color
+
+    def error(self):
+        """-> the reason string from the server's `error` message, or None
+        if none has arrived (yet, or ever) -- guarded by the same lock as
+        `snapshot`/`color`, since the network thread writes all three. A
+        server that refuses the connection (e.g. AlreadyConnectedError,
+        see common.registry) sends this instead of `assigned`, so run()
+        can tell the two apart before ever opening a window."""
+        with self._lock:
+            return self._error
 
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
@@ -156,6 +168,9 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                 elif message["type"] == protocol.ASSIGNED:
                     with self._lock:
                         self._color = message["color"]
+                elif message["type"] == protocol.ERROR:
+                    with self._lock:
+                        self._error = message["reason"]
 
 
 class _SnapshotBoard:  # pragma: no cover
@@ -242,22 +257,34 @@ class _SnapshotBoard:  # pragma: no cover
         return 0 <= row < snapshot.board_height and 0 <= col < snapshot.board_width
 
 
-class _PanelOverlay:  # pragma: no cover, pylint: disable=too-few-public-methods
-    # An overlay is meant to have exactly one public entry point --
-    # draw(frame, elapsed_ms), the shape every overlay in the loop shares --
-    # so one public method is the design, not a gap.
-    """Wraps ScorePanel so the draw loop can treat every overlay the same
-    way -- draw(frame, elapsed_ms) -- since ScorePanel.draw(image) is
-    frozen and takes only one argument. Wrapping, not editing."""
+_PANEL_WIDTH = 280  # extra canvas width for ScorePanel's text and the mute
+#                     indicator; wide enough by eye against real rendered
+#                     frames (see the manual verification for this fix).
 
-    def __init__(self, panel):
-        self._panel = panel
 
-    def draw(self, frame, elapsed_ms):  # pylint: disable=unused-argument
-        """Draw the wrapped ScorePanel; `elapsed_ms` is unused, kept only
-        so every overlay in the loop shares the same draw(frame, elapsed_ms)
-        signature."""
-        self._panel.draw(frame)
+def _widen_canvas(frame, extra_width):  # pragma: no cover
+    """-> a new Img, `extra_width` pixels wider than `frame`, with `frame`'s
+    pixels copied into the left region and a dark strip added on the right
+    -- room for ScorePanel's text and the mute indicator, which app.py never
+    had: board.png is 816px wide and ScorePanel is placed at
+    x=image_w+20=836, off the canvas entirely. That is true in app.py too,
+    so the panel has never been visible there either -- fixed here only,
+    since app.py and view/ are frozen."""
+    height, width, channels = frame.img.shape
+    background = (30, 30, 30, 255) if channels == 4 else (30, 30, 30)
+    canvas = np.empty((height, width + extra_width, channels), dtype=frame.img.dtype)
+    canvas[:] = background
+    canvas[:, :width] = frame.img
+    widened = Img()
+    widened.img = canvas
+    return widened
+
+
+def _draw_mute_indicator(frame, muted, x, y):  # pragma: no cover
+    """Show whether sound is on or off, and the key that toggles it -- 'm'
+    is otherwise undiscoverable."""
+    text = "Sound: OFF (m)" if muted else "Sound: ON (m)"
+    frame.put_text(text, x, y, 0.6, color=(255, 255, 255, 255))
 
 
 def _prompt_username():  # pragma: no cover
@@ -302,7 +329,11 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylin
     banner = BannerOverlay()
     sound_player = SoundPlayer(_SOUNDS)
     bus = Bus()
-    event_source = GameEventSource(bus)
+    # promotions is passed explicitly, the same way server.py passes
+    # king_type=_CONFIG.king_type to GameRegistry instead of relying on its
+    # default -- one source of truth (_CONFIG) instead of two declarations
+    # of the same fact.
+    event_source = GameEventSource(bus, promotions=_CONFIG.promotions)
 
     # elapsed_ms is a run()-loop concept (a wall-clock stopwatch); observe()
     # needs it, but the bus only ever passes one payload (the snapshot). This
@@ -317,15 +348,35 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylin
     bus.subscribe(topics.GAME_START, banner.on_game_start)
     bus.subscribe(topics.GAME_END, banner.on_game_end)
 
-    overlays = [_PanelOverlay(panel), banner]
-    return controller, renderer, link, bus, clock, overlays
+    return controller, renderer, link, bus, clock, banner, panel, sound_player
+
+
+def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
+    """Block until the network thread has recorded either a seat (color()
+    becomes non-None, from the server's `assigned` message) or a refusal
+    (error() becomes non-None, from the server's `error` message) --
+    whichever the server sends first; the two are mutually exclusive on the
+    wire. Polling a plain lock-guarded field matches how the rest of
+    _ServerLink is read (snapshot()/color() are read the same way, not via
+    a condition variable), and this window is short: a login round-trip,
+    not a whole game. Called before cv2.namedWindow, so an `error` never
+    gets a window opened for it -- see run()."""
+    while link.color() is None and link.error() is None:
+        time.sleep(poll_interval)
 
 
 def run():  # pragma: no cover
-    """Prompt for a username on the terminal (slide 3's shell login), then
-    open the window and run the frame loop until the server reports the
-    game over or Esc/Q is pressed. Each frame draws whatever snapshot the
-    network thread last received; nothing is drawn before the first one."""
+    """Prompt for a username on the terminal (slide 3's shell login), wait
+    for the server to either seat this connection or refuse it, then open
+    the window and run the frame loop until Esc/Q is pressed. Each frame
+    draws whatever snapshot the network thread last received; nothing is
+    drawn before the first one.
+
+    A refusal (e.g. AlreadyConnectedError on the server: this username is
+    already connected to this game from another window) is reported on the
+    terminal and ends the program before any window opens -- there would be
+    nothing for that window to do, since the server never seats it, so
+    opening one would just show an empty board no click can ever affect."""
     # cv2 is a compiled C extension, so pylint cannot introspect its
     # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
     # all exist and work at runtime (app.py, frozen and untouched, uses the
@@ -333,8 +384,13 @@ def run():  # pragma: no cover
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     username = _prompt_username()
-    controller, renderer, link, bus, clock, overlays = build_client(username=username)
+    controller, renderer, link, bus, clock, banner, panel, sound_player = \
+        build_client(username=username)
     link.start()
+    _wait_for_assignment_or_error(link)
+    if link.error() is not None:
+        print(f"Connection refused by server: {link.error()}")
+        return
     start_time = time.time()
 
     def on_mouse(event, x, y, _flags, _param):
@@ -364,13 +420,41 @@ def run():  # pragma: no cover
             #   Adding a future subscriber never touches this loop -- that is
             #   the whole justification for routing these through a bus.
             frame = renderer.render(snapshot, elapsed_ms)
-            for overlay in overlays:                  # panel and banner both draw here
-                overlay.draw(frame, elapsed_ms)
+            banner.draw(frame, elapsed_ms)  # centered on the true board size,
+            #   before the canvas is widened below -- see _widen_canvas.
+            frame = _widen_canvas(frame, _PANEL_WIDTH)
+            panel.draw(frame)
+            _draw_mute_indicator(frame, sound_player.muted,
+                                  frame.img.shape[1] - _PANEL_WIDTH + 20, 15)
             cv2.imshow(_WINDOW, frame.img)
-            if snapshot.game_over:
-                break
+            # Deliberately no `if snapshot.game_over: break` here: the final
+            # position, the game-over banner and the game-over sound all
+            # need the window to keep drawing (and playing) to be seen and
+            # heard at all -- breaking here would close it the instant the
+            # king falls, before any of the three could register. The
+            # player closes the window with Esc/Q below, same as always;
+            # reopening the client simply joins a new game, since the
+            # server already removes a finished game after its linger
+            # period (common.registry.GAME_END_LINGER_MS) -- no extra code
+            # needed here for that.
         key = cv2.waitKey(16) & 0xFF
-        if key in (27, ord("q")):
+        # Compared case-insensitively: cv2.waitKey returns whatever code the
+        # OS reports for the physical key, which is upper-case while Caps
+        # Lock is on or Shift is held -- ord("q")/ord("m") alone then never
+        # match for the rest of the session, silently, with no error and no
+        # visible symptom beyond "the key does nothing" (Esc still quits,
+        # since 27 has no case, so this is easy to miss entirely).
+        if key in (27, ord("q"), ord("Q")):
+            break
+        if key in (ord("m"), ord("M")):
+            sound_player.toggle_mute()
+        # OpenCV does not treat the window's own close ("X") button as a
+        # key press -- cv2.waitKey above never sees it, so Esc/Q cannot
+        # catch it. WND_PROP_VISIBLE drops below 1 the moment the OS
+        # actually closes the window, which is the only signal there is
+        # for that click; checked every tick, right after waitKey has had
+        # its chance to pump that event.
+        if cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             break
 
     cv2.destroyAllWindows()

@@ -13,6 +13,11 @@ numpy==2.2.6
 # splitting server/client requirements into two files is the later cleanup
 # the design doc already anticipates, not part of this step.
 opencv-python==5.0.0.93
+# pygame is used only for its mixer (client/sound.py's real playback
+# backend, replacing winsound) -- sound is played on each player's own
+# machine, never on the server, so the server image does not need this
+# either; same client-only reasoning as opencv-python above.
+pygame==2.6.1
 # psycopg 3 is the current PostgreSQL driver for Python; the [binary]
 # extra ships a precompiled build so the image needs no C toolchain.
 psycopg[binary]==3.3.4

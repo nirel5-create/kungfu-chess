@@ -3,7 +3,7 @@ import pytest
 from common import protocol, topics
 from common.bus import Bus
 from common.net import GameSession
-from common.registry import GAME_END_LINGER_MS, GameRegistry
+from common.registry import GAME_END_LINGER_MS, AlreadyConnectedError, GameRegistry
 from engine.game import GameEngine
 from model.board import Board
 from tests.helpers import CFG, wait_for
@@ -67,12 +67,44 @@ def test_first_join_gets_w_second_b_third_and_fourth_get_viewer():
     assert registry.join(game_id, "dave") == "viewer"
 
 
-def test_join_with_a_username_that_already_has_a_seat_returns_the_same_color():
+def test_join_with_a_username_that_already_has_a_seat_and_has_left_returns_the_same_color():
+    # "already has a seat" alone is not enough to call this a reconnect --
+    # see the two tests below for the case this used to get wrong.
     registry = GameRegistry(_FakeSession)
     game_id = registry.create()
     first = registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
     again = registry.join(game_id, "alice")
     assert again == first
+
+
+def test_a_second_join_while_the_username_is_still_connected_raises():
+    # The bug this fixes: the same username opening a second window (no
+    # leave() in between) used to get the SAME seat back, letting both
+    # windows control the same pieces. `connected` is what tells "coming
+    # back" apart from "still here". A prior fix silently seated the
+    # second connection as "viewer" instead, which stopped the double
+    # control but left the player with no explanation for why their
+    # window suddenly could not move anything -- an explicit, named
+    # exception is what lets the caller (server.py) tell them why: a
+    # refusal the player can read beats a silent demotion they must
+    # deduce.
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    first = registry.join(game_id, "alice")
+    assert first == "w"
+    with pytest.raises(AlreadyConnectedError):
+        registry.join(game_id, "alice")  # no leave() -- still connected
+
+
+def test_a_duplicate_connection_attempt_does_not_disturb_the_original_seat():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    with pytest.raises(AlreadyConnectedError):
+        registry.join(game_id, "alice")  # duplicate -> raises, but must
+        #                                   not overwrite alice's real seat
+    assert registry.color_of(game_id, "alice") == "w"
 
 
 def test_leave_then_join_with_the_same_username_returns_the_same_color_again():

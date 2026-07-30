@@ -4,11 +4,29 @@ Renderer is frozen, so this never draws inside it -- only over its output,
 the same way ScorePanel already does.
 
 What this module owns: a small state machine (what text is showing, and
-until when) and painting that text onto a frame with Img.put_text, which
-already exists.
+until when) and painting that text onto a frame -- with Img.put_text for
+the text itself, and a direct cv2.rectangle call on frame.img for the dark
+backing behind it, since Img (frozen, view/img.py) exposes no rectangle
+primitive of its own. Writing straight to frame.img is the same thing
+client.py's _widen_canvas already does for the same reason (Img's public
+`.img` is a plain, directly-assignable/mutable numpy array).
 What it does NOT own: deciding when the game started or ended -- that is
 client.events.GameEventSource -- or anything about the renderer.
 """
+
+import cv2
+
+# cv2 is a compiled C extension, so pylint cannot introspect its members:
+# FONT_HERSHEY_SIMPLEX, getTextSize and rectangle below all exist and work
+# at runtime (client.py's run() disables the same false positive for its
+# own cv2 members, with the same reasoning). Every no-member warning in
+# this file from here on is that false positive, not a real one.
+# pylint: disable=no-member
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+_FONT_SIZE = 1.5
+_THICKNESS = 3
+_BACKING_COLOR = (0, 0, 0)  # opaque black; alpha appended below if needed
+_BACKING_PADDING = 16
 
 
 class BannerOverlay:
@@ -50,12 +68,22 @@ class BannerOverlay:
         return self._text
 
     def draw(self, frame, elapsed_ms):
-        """Draw the current banner onto `frame`, if one is showing. A
-        no-op -- frame is never touched -- on a fresh overlay or once the
-        banner has expired."""
+        """Draw the current banner onto `frame`, if one is showing, over a
+        filled dark backing rectangle sized to the text -- without it,
+        white text is unreadable over a light board square, which for
+        text this size is true under roughly half of any board position.
+        A no-op -- frame is never touched -- on a fresh overlay or once
+        the banner has expired."""
         text = self.showing(elapsed_ms)
         if text is None:
             return
         height, width = frame.img.shape[:2]
-        frame.put_text(text, width // 2 - 80, height // 2, 1.5,
-                        color=(255, 255, 255, 255), thickness=3)
+        x, y = width // 2 - 80, height // 2
+        (text_w, text_h), baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
+        channels = frame.img.shape[2]
+        backing_color = _BACKING_COLOR + (255,) if channels == 4 else _BACKING_COLOR
+        top_left = (x - _BACKING_PADDING, y - text_h - _BACKING_PADDING)
+        bottom_right = (x + text_w + _BACKING_PADDING, y + baseline + _BACKING_PADDING)
+        cv2.rectangle(frame.img, top_left, bottom_right, backing_color, thickness=-1)
+        frame.put_text(text, x, y, _FONT_SIZE,
+                        color=(255, 255, 255, 255), thickness=_THICKNESS)
