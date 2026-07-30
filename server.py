@@ -215,7 +215,13 @@ async def _main():  # pragma: no cover
     # unconditionally from here on is what lets ELO (a later step) attach
     # as a bus subscriber, with no change to GameRegistry or this file.
     bus = Bus()
-    registry = GameRegistry(_build_session, bus=bus)
+    # king_type is passed explicitly rather than left at GameRegistry's own
+    # default: both currently say "K", but that is one fact declared twice.
+    # If _CONFIG's king token ever changed, an implicit default here would
+    # silently desync -- the registry would keep detecting game_over
+    # correctly (that comes from the engine) but _winner_of would find no
+    # matching king and report winner=None forever.
+    registry = GameRegistry(_build_session, bus=bus, king_type=_CONFIG.king_type)
     clients = {}  # websocket -> (game_id, username)
 
     async def handler(websocket):
