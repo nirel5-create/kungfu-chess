@@ -49,8 +49,9 @@ import logging
 
 import websockets
 
-from common import db, net, protocol
+from common import db, net, protocol, topics
 from common.bus import Bus
+from common.logsetup import add_file_logging
 from common.registry import AlreadyConnectedError, GameRegistry
 from engine.game import GameEngine
 from model.board import Board
@@ -72,6 +73,12 @@ from model.config import Config
 _HOST = "0.0.0.0"
 _PORT = 8765
 _TICK_MS = 30
+_LOG_PATH = "logs/server.log"
+# Not the per-tick state broadcast itself -- that is ~33 lines/second and
+# would make the log file useless within seconds (slide 6 asks for logs
+# that can be inspected afterward, not a firehose). A summary every 10s is
+# enough to show the loop is alive without doing that.
+_SUMMARY_INTERVAL_MS = 10_000
 
 # Matches app.py's build_game(): the crystal board asset has a thin decorative
 # frame, so cells are 98px and the first cell starts 13px in, 15px down. The
@@ -131,7 +138,9 @@ def _find_or_create_game(registry):  # pragma: no cover
         session = registry.session(game_id)
         if session is not None and not session.game_over:
             return game_id
-    return registry.create()
+    game_id = registry.create()
+    _log.info("created game %s", game_id)
+    return game_id
 
 
 async def _handle_client(websocket, registry, clients):  # pragma: no cover
@@ -152,6 +161,7 @@ async def _handle_client(websocket, registry, clients):  # pragma: no cover
     try:
         color = registry.join(game_id, username)
     except AlreadyConnectedError:
+        _log.warning("refused %s: already connected to game %s", username, game_id)
         await websocket.send(protocol.dumps(protocol.error("already_connected")))
         await websocket.close()
         return
@@ -164,15 +174,20 @@ async def _handle_client(websocket, registry, clients):  # pragma: no cover
             try:
                 message = protocol.loads(raw)
             except protocol.ProtocolError:
-                _log.exception("dropping malformed frame from a client")
+                _log.exception("dropping malformed frame from %s in game %s",
+                                username, game_id)
                 continue
             session = registry.session(game_id)
             if session is None:
                 continue  # the game's linger period already elapsed
-            session.submit(message, registry.color_of(game_id, username))
+            applied = session.submit(message, registry.color_of(game_id, username))
+            _log.info("%s %s from %s in game %s",
+                       "applied" if applied else "refused", message.get("type"),
+                       username, game_id)
     finally:
         clients.pop(websocket, None)
         registry.leave(game_id, username)
+        _log.info("%s disconnected from game %s", username, game_id)
 
 
 async def _tick_loop(registry, clients):  # pragma: no cover
@@ -182,10 +197,32 @@ async def _tick_loop(registry, clients):  # pragma: no cover
     Room exists they will not, and broadcasting per-game already handles
     that -- Room needs no change here. A client whose send fails (it
     dropped the connection) is removed from `clients` rather than stopping
-    the broadcast for everyone else."""
+    the broadcast for everyone else.
+
+    Also logs a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
+    connected clients) -- never the per-tick broadcast itself; see
+    _SUMMARY_INTERVAL_MS's comment for why not."""
+    tick_count = 0
+    ms_since_summary = 0
     while True:
         await asyncio.sleep(_TICK_MS / 1000)
         registry.advance(_TICK_MS)
+        tick_count += 1
+        ms_since_summary += _TICK_MS
+        if ms_since_summary >= _SUMMARY_INTERVAL_MS:
+            ms_since_summary = 0
+            # Known gap, seen live in this summary (live_games=0,
+            # connected_clients=3): a client is never told its game was
+            # removed after the linger period elapses (GameRegistry drops
+            # it silently, see common/registry.py's GAME_END_LINGER_MS),
+            # so `clients` can outlive every game_ids() entry it points
+            # at. Those clients stay connected, attached to a game_id
+            # registry.session() now returns None for, and see a frozen
+            # board (the tick loop's per-game send below simply has
+            # nothing to send them). Not fixed here -- noted because this
+            # summary is what makes it visible at all.
+            _log.info("tick=%d live_games=%d connected_clients=%d",
+                       tick_count, len(registry.game_ids()), len(clients))
         dead = set()
         for game_id in registry.game_ids():
             session = registry.session(game_id)
@@ -221,11 +258,17 @@ def _connect_db():  # pragma: no cover
 
 
 async def _main():  # pragma: no cover
+    _log.info("starting kung-fu chess server")
     _connect_db()
-    # Nothing subscribes to GAME_START/GAME_END yet -- publishing them
+    bus = Bus()
+    # Nothing else subscribes to GAME_START yet -- publishing it
     # unconditionally from here on is what lets ELO (a later step) attach
     # as a bus subscriber, with no change to GameRegistry or this file.
-    bus = Bus()
+    # GAME_END gets one subscriber here, purely to log the winner: this is
+    # the only place that knows how to turn a game_id into a log line, so
+    # it belongs here rather than in GameRegistry, which does not log.
+    bus.subscribe(topics.GAME_END, lambda payload: _log.info(
+        "game %s ended, winner=%s", payload["game_id"], payload["winner"]))
     # king_type is passed explicitly rather than left at GameRegistry's own
     # default: both currently say "K", but that is one fact declared twice.
     # If _CONFIG's king token ever changed, an implicit default here would
@@ -245,4 +288,19 @@ async def _main():  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
+    # Console (above) is for watching a session live; the file (below) is
+    # for looking at one afterward -- slide 6 wants both, and this is what
+    # makes there be a file to look at. Shared with client.py, so the two
+    # log files cannot drift into different formats.
+    add_file_logging(_LOG_PATH)
+    # Docker's HEALTHCHECK (see Dockerfile) opens a bare TCP socket to our
+    # port every 10s and closes it again without ever sending a WebSocket
+    # handshake -- websockets logs that as an ERROR with a full traceback,
+    # on its own "websockets.server" logger, every single time. That is
+    # our own healthcheck probing the port, not a real error, and at one
+    # every 10s it would drown out everything slide 6 actually wants this
+    # log for. Raising the level on that ONE logger -- not root, and not
+    # our own __main__ logger below, which keeps logging at INFO exactly
+    # as before -- is what silences just this noise and nothing else.
+    logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
     asyncio.run(_main())

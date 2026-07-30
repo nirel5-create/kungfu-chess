@@ -24,6 +24,17 @@ services:
     build: .
     ports:
       - "8765:8765"
+    volumes:
+      # A bind mount, not a named volume: logs/server.log (server.py's
+      # _LOG_PATH, /app/logs inside the container per the Dockerfile's
+      # WORKDIR) written only to the container's own filesystem is
+      # unreadable from the host and gone the moment the container is
+      # removed -- Server_Design.md's Observability section warns about
+      # exactly this. Binding it to ./logs on the host means the file is
+      # readable while the container runs and still there after `docker
+      # compose down` (down does not delete a bind-mounted host
+      # directory, only a container's own writable layer).
+      - ./logs:/app/logs
     depends_on:
       db:
         # Postgres takes a few seconds to initialise. Without this

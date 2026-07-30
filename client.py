@@ -44,6 +44,7 @@ Run with:  python client.py
 """
 
 import asyncio
+import logging
 import threading
 import time
 
@@ -56,6 +57,7 @@ from client.overlay import BannerOverlay
 from client.sound import SoundPlayer
 from common import net, protocol, topics
 from common.bus import Bus
+from common.logsetup import add_file_logging, sanitize_for_filename
 from input.board_mapper import BoardMapper
 from input.controller import Controller
 from model.config import Config
@@ -72,6 +74,9 @@ _PIECES = _ASSETS + "/pieces_mine"
 _BOARD_PNG = _ASSETS + "/board.png"
 _SOUNDS = _ASSETS + "/sounds"
 _SERVER_URI = "ws://localhost:8765"
+_LOG_DIR = "logs"
+
+_log = logging.getLogger(__name__)
 
 # Matches server.py's Config exactly, so the pixel positions inside every
 # snapshot line up with the sprites drawn from this same crystal-board asset.
@@ -137,7 +142,9 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         the connection is not up yet, mirroring how a click before the game
         starts has nothing to act on."""
         if self._websocket is None:
+            _log.warning("dropped %s: not connected yet", message.get("type"))
             return
+        _log.info("sending %s", message.get("type"))
         asyncio.run_coroutine_threadsafe(
             self._websocket.send(protocol.dumps(message)), self._loop)
 
@@ -148,6 +155,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
     async def _receive_loop(self):
         async with websockets.connect(self._uri) as websocket:
             self._websocket = websocket
+            _log.info("connected to %s", self._uri)
             # Sent here, inside the coroutine that just opened the socket,
             # rather than via the public `send` after start() returns: `send`
             # silently drops a message until `_websocket` is set (see below),
@@ -156,6 +164,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
             # thing done once the socket is open, makes it always the first
             # message on the wire with no race.
             await websocket.send(protocol.dumps(protocol.login(self._username)))
+            _log.info("login sent as %s", self._username)
             async for raw in websocket:
                 try:
                     message = protocol.loads(raw)
@@ -168,9 +177,12 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                 elif message["type"] == protocol.ASSIGNED:
                     with self._lock:
                         self._color = message["color"]
+                    _log.info("assigned color %s", message["color"])
                 elif message["type"] == protocol.ERROR:
                     with self._lock:
                         self._error = message["reason"]
+                    _log.warning("refused by server: %s", message["reason"])
+            _log.info("disconnected from %s", self._uri)
 
 
 class _SnapshotBoard:  # pragma: no cover
@@ -300,6 +312,18 @@ def _prompt_username():  # pragma: no cover
             return username
 
 
+def _client_log_path(username):  # pragma: no cover
+    """-> the per-client log file path for `username`, e.g.
+    "logs/client_alice.log". One file per client, not one shared
+    logs/client.log: several clients on the same machine appending to a
+    single file interleaves unrelated sessions with nothing to tell them
+    apart, and concurrent appends from separate processes are not safe on
+    Windows besides. `username` is free text typed at the terminal prompt,
+    so it is sanitized first -- see sanitize_for_filename's docstring for
+    exactly what that guards against."""
+    return f"{_LOG_DIR}/client_{sanitize_for_filename(username)}.log"
+
+
 def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylint: disable=too-many-locals
     # This is the composition root: the one place that wires every
     # collaborator together, mirroring app.py's build_game(). The local
@@ -365,12 +389,18 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
         time.sleep(poll_interval)
 
 
-def run():  # pragma: no cover
-    """Prompt for a username on the terminal (slide 3's shell login), wait
-    for the server to either seat this connection or refuse it, then open
-    the window and run the frame loop until Esc/Q is pressed. Each frame
-    draws whatever snapshot the network thread last received; nothing is
-    drawn before the first one.
+def run(username):  # pragma: no cover
+    """Wait for the server to either seat this connection or refuse it,
+    then open the window and run the frame loop until Esc/Q is pressed.
+    Each frame draws whatever snapshot the network thread last received;
+    nothing is drawn before the first one.
+
+    `username` is already known by the time this is called -- __main__
+    prompts for it first (slide 3: login in a shell, not the GUI) and
+    configures per-client file logging from it (see _client_log_path)
+    before run() does anything else, so every line this function and
+    everything it builds logs lands in that client's own file from the
+    very first one.
 
     A refusal (e.g. AlreadyConnectedError on the server: this username is
     already connected to this game from another window) is reported on the
@@ -383,7 +413,7 @@ def run():  # pragma: no cover
     # same members the same way). Every no-member warning from here to the
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
-    username = _prompt_username()
+    _log.info("client starting")
     controller, renderer, link, bus, clock, banner, panel, sound_player = \
         build_client(username=username)
     link.start()
@@ -460,5 +490,15 @@ def run():  # pragma: no cover
     cv2.destroyAllWindows()
 
 
-if __name__ == "__main__":
-    run()  # pragma: no cover
+if __name__ == "__main__":  # pragma: no cover
+    logging.basicConfig(level=logging.INFO)
+    # The username must be known before file logging is configured -- one
+    # log file per client (see _client_log_path), not a shared
+    # logs/client.log every window on this machine would interleave into.
+    # Console (above) is for watching a session live; the file (below) is
+    # for looking at one afterward -- slide 6 wants both, and this is what
+    # makes there be a file to look at. Shared with server.py, so the two
+    # log files cannot drift into different formats.
+    _username = _prompt_username()
+    add_file_logging(_client_log_path(_username))
+    run(_username)

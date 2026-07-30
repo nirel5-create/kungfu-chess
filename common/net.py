@@ -69,14 +69,29 @@ class GameSession:
 
         Cells arrive as JSON lists, but the engine uses them as dict/set keys
         internally (RealTimeArbiter tracks motions by cell), so each list is
-        converted to a tuple here before it reaches the engine."""
+        converted to a tuple here before it reaches the engine.
+
+        -> True if the command was forwarded to the engine, False if it was
+        refused (unrecognized type, or `color` may not act on this piece).
+        This is "applied" only in the ownership sense -- the engine itself
+        is still free to silently ignore an illegal move, which this class
+        has no way to observe either (request_move/request_jump return
+        nothing). Existing callers that ignore the return value (every
+        test in tests/unit/test_session.py, and ClientProxy, which never
+        calls submit at all) are unaffected -- they never looked at the
+        old implicit None."""
         message_type = message.get("type")
         if message_type == protocol.MOVE:
             if self._may_act(color, message["src"]):
                 self._engine.request_move(tuple(message["src"]), tuple(message["dst"]))
-        elif message_type == protocol.JUMP:
+                return True
+            return False
+        if message_type == protocol.JUMP:
             if self._may_act(color, message["cell"]):
                 self._engine.request_jump(tuple(message["cell"]))
+                return True
+            return False
+        return False
 
     def _may_act(self, color, cell):
         """Whether `color` may act on the piece sitting at `cell` (a JSON
