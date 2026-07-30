@@ -32,6 +32,14 @@ persistence: this is presentation only (slide 3); the account system is a
 later step. Which color this client is assigned is decided by the server
 from connection order, not from anything this file sends or asserts.
 
+Score, move log, sound and the start/end banner are wired through one
+common.bus.Bus (Step 6): build_client subscribes GameObserver (frozen,
+untouched -- wrapped in a lambda, never edited), client.events.GameEventSource,
+client.sound.SoundPlayer and client.overlay.BannerOverlay to it, and the draw
+loop below only ever calls bus.publish(topics.SNAPSHOT, snapshot) -- it never
+names who reacts. Adding a future subscriber never touches this loop; that is
+the whole point of routing these four through a bus instead of direct calls.
+
 Run with:  python client.py
 """
 
@@ -42,7 +50,11 @@ import time
 import cv2
 import websockets
 
-from common import net, protocol
+from client.events import GameEventSource
+from client.overlay import BannerOverlay
+from client.sound import SoundPlayer
+from common import net, protocol, topics
+from common.bus import Bus
 from input.board_mapper import BoardMapper
 from input.controller import Controller
 from model.config import Config
@@ -57,6 +69,7 @@ _WINDOW = "Kung-Fu Chess (client)"
 _ASSETS = "assets"
 _PIECES = _ASSETS + "/pieces_mine"
 _BOARD_PNG = _ASSETS + "/board.png"
+_SOUNDS = _ASSETS + "/sounds"
 _SERVER_URI = "ws://localhost:8765"
 
 # Matches server.py's Config exactly, so the pixel positions inside every
@@ -229,6 +242,24 @@ class _SnapshotBoard:  # pragma: no cover
         return 0 <= row < snapshot.board_height and 0 <= col < snapshot.board_width
 
 
+class _PanelOverlay:  # pragma: no cover, pylint: disable=too-few-public-methods
+    # An overlay is meant to have exactly one public entry point --
+    # draw(frame, elapsed_ms), the shape every overlay in the loop shares --
+    # so one public method is the design, not a gap.
+    """Wraps ScorePanel so the draw loop can treat every overlay the same
+    way -- draw(frame, elapsed_ms) -- since ScorePanel.draw(image) is
+    frozen and takes only one argument. Wrapping, not editing."""
+
+    def __init__(self, panel):
+        self._panel = panel
+
+    def draw(self, frame, elapsed_ms):  # pylint: disable=unused-argument
+        """Draw the wrapped ScorePanel; `elapsed_ms` is unused, kept only
+        so every overlay in the loop shares the same draw(frame, elapsed_ms)
+        signature."""
+        self._panel.draw(frame)
+
+
 def _prompt_username():  # pragma: no cover
     """Read a non-empty username from the terminal, before the window opens
     (slide 3: login in a shell, not the GUI). Empty input (just pressing
@@ -242,11 +273,17 @@ def _prompt_username():  # pragma: no cover
             return username
 
 
-def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover
+def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylint: disable=too-many-locals
+    # This is the composition root: the one place that wires every
+    # collaborator together, mirroring app.py's build_game(). The local
+    # count reflects how many independent parts there are to wire, not
+    # tangled logic -- splitting it up would just move names around, not
+    # reduce what this function is responsible for building.
     """Compose the whole graphical stack and return the parts run() drives.
     Mirrors app.py's build_game(), except the engine is a ClientProxy, the
-    board is a _SnapshotBoard instead of a model.Board, and there is a
-    ServerLink instead of a GameClock."""
+    board is a _SnapshotBoard instead of a model.Board, there is a
+    ServerLink instead of a GameClock, and score/log/sound/banner are wired
+    through one Bus instead of being called directly."""
     link = _ServerLink(uri, username)
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
@@ -262,7 +299,26 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover
 
     observer = GameObserver(_CONFIG)
     panel = ScorePanel(observer, x=image_w + 20, y=40)
-    return controller, renderer, link, observer, panel
+    banner = BannerOverlay()
+    sound_player = SoundPlayer(_SOUNDS)
+    bus = Bus()
+    event_source = GameEventSource(bus)
+
+    # elapsed_ms is a run()-loop concept (a wall-clock stopwatch); observe()
+    # needs it, but the bus only ever passes one payload (the snapshot). This
+    # tiny mutable box is written by run()'s loop just before every publish
+    # and read by the lambda below -- the "tiny lambda supplying elapsed_ms"
+    # that lets GameObserver subscribe unmodified.
+    clock = {"elapsed_ms": 0}
+    bus.subscribe(topics.SNAPSHOT,
+                  lambda snapshot: observer.observe(snapshot, clock["elapsed_ms"]))
+    bus.subscribe(topics.SNAPSHOT, event_source.on_snapshot)
+    bus.subscribe(topics.SOUND, sound_player.on_sound)
+    bus.subscribe(topics.GAME_START, banner.on_game_start)
+    bus.subscribe(topics.GAME_END, banner.on_game_end)
+
+    overlays = [_PanelOverlay(panel), banner]
+    return controller, renderer, link, bus, clock, overlays
 
 
 def run():  # pragma: no cover
@@ -277,7 +333,7 @@ def run():  # pragma: no cover
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     username = _prompt_username()
-    controller, renderer, link, observer, panel = build_client(username=username)
+    controller, renderer, link, bus, clock, overlays = build_client(username=username)
     link.start()
     start_time = time.time()
 
@@ -302,9 +358,14 @@ def run():  # pragma: no cover
             # into the snapshot the server actually sent.
             snapshot = snapshot._replace(selected_cell=controller.selection)
             elapsed_ms = int((time.time() - start_time) * 1000)
-            observer.observe(snapshot, elapsed_ms)
+            clock["elapsed_ms"] = elapsed_ms
+            bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts: score,
+            #   move log, sound and the banner all subscribe in build_client.
+            #   Adding a future subscriber never touches this loop -- that is
+            #   the whole justification for routing these through a bus.
             frame = renderer.render(snapshot, elapsed_ms)
-            panel.draw(frame)
+            for overlay in overlays:                  # panel and banner both draw here
+                overlay.draw(frame, elapsed_ms)
             cv2.imshow(_WINDOW, frame.img)
             if snapshot.game_over:
                 break

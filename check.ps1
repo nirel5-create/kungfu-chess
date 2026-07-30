@@ -9,11 +9,11 @@ python -m pytest -q
 if ($LASTEXITCODE -ne 0) { Write-Host "TESTS FAILED - do not push" -ForegroundColor Red; exit 1 }
 
 Write-Host "`n[pylint (must be 10.00/10)]" -ForegroundColor Cyan
-# common/, server.py and client.py are ours to hold to the style gate. The
-# engine/model/rules/realtime/boardio/texttests/view/input packages are
-# frozen (score ~7.6) and out of scope: shipping style fixes into frozen
-# code is not this project's call to make.
-python -m pylint common server.py client.py
+# common/, server.py, client.py and the client/ package are ours to hold to
+# the style gate. The engine/model/rules/realtime/boardio/texttests/view/
+# input packages are frozen (score ~7.6) and out of scope: shipping style
+# fixes into frozen code is not this project's call to make.
+python -m pylint common server.py client.py client
 if ($LASTEXITCODE -ne 0) { Write-Host "PYLINT NOT CLEAN - do not push" -ForegroundColor Red; exit 1 }
 
 if (-not $Full) {
@@ -24,6 +24,7 @@ if (-not $Full) {
 Write-Host "`n[coverage (must be 100%)]" -ForegroundColor Cyan
 python -m pytest -q --cov=model --cov=rules --cov=realtime --cov=engine `
     --cov=input --cov=boardio --cov=texttests --cov=view --cov=common --cov=main `
+    --cov=client `
     --cov-report=term --cov-fail-under=100
 if ($LASTEXITCODE -ne 0) { Write-Host "COVERAGE BELOW 100% - do not push" -ForegroundColor Red; exit 1 }
 
