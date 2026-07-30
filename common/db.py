@@ -36,16 +36,24 @@ ON CONFLICT (username) DO UPDATE SET rating = EXCLUDED.rating
 """
 
 
-def connect(url=None):
+def connect(url=None, connector=None):
     """Open a connection to Postgres. `url` defaults to the DATABASE_URL
     environment variable; raises a clear error if neither is given, rather
     than silently falling through to psycopg's own default connection
     parameters (which would likely reach the wrong database, or none at
-    all)."""
+    all).
+
+    `connector` is the callable that actually opens the connection given a
+    url, and defaults to the real psycopg connector below. It is injected --
+    the same pattern as ClientProxy(send) and GameRegistry(make_session)
+    elsewhere in this project -- so the URL-resolution logic above can be
+    exercised by a test with no live database and no patching of this
+    module's own code: a test just passes its own callable instead."""
     url = url or os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL is not set and no url was given")
-    return _connect(url)
+    connector = connector or _connect
+    return connector(url)
 
 
 def _connect(url):  # pragma: no cover -- needs a live Postgres to exercise

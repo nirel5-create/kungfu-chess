@@ -43,26 +43,32 @@ def test_default_rating_is_1200():
 
 
 def test_connect_raises_a_clear_error_when_database_url_is_absent(monkeypatch):
+    # monkeypatch.delenv sets an environment variable -- process-global
+    # state, not a collaborator db.py takes as an argument -- so this is not
+    # the patching the mentor forbade. There is also no other way to
+    # exercise "DATABASE_URL absent": os.environ has to actually be missing
+    # the key for this branch to run.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(ValueError):
         db.connect()
 
 
-def test_connect_passes_an_explicit_url_through_to_the_underlying_connect(monkeypatch):
-    # The actual psycopg.connect() call lives in the pragma'd _connect() --
-    # this stubs that one line out rather than reaching a real Postgres, per
-    # the house rule of not testing anything that needs a live database.
+def test_connect_passes_an_explicit_url_to_the_injected_connector():
+    # No monkeypatching: `connector` is a real parameter of connect(), so a
+    # test just passes its own callable, the same way a test hands
+    # ClientProxy a list's .append or GameRegistry a fake make_session.
     seen = []
-    monkeypatch.setattr(db, "_connect", lambda url: seen.append(url) or "a connection")
-    result = db.connect(url="postgresql://example/db")
+    result = db.connect(url="postgresql://example/db",
+                         connector=lambda url: seen.append(url) or "a connection")
     assert seen == ["postgresql://example/db"]
     assert result == "a connection"
 
 
 def test_connect_falls_back_to_the_database_url_env_var(monkeypatch):
+    # Same distinction as the "absent" test above: setting the env var is
+    # state, not a patch, and it is the only way to exercise this branch.
     monkeypatch.setenv("DATABASE_URL", "postgresql://from-env/db")
-    monkeypatch.setattr(db, "_connect", lambda url: url)
-    assert db.connect() == "postgresql://from-env/db"
+    assert db.connect(connector=lambda url: url) == "postgresql://from-env/db"
 
 
 def test_ensure_schema_issues_one_statement_and_commits():
