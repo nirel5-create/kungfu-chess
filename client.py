@@ -54,6 +54,7 @@ import websockets
 
 from client.events import GameEventSource
 from client.overlay import BannerOverlay
+from client.roomdialog import CREATE, JOIN, ask_room
 from client.sound import SoundPlayer
 from common import net, protocol, topics
 from common.bus import Bus
@@ -90,21 +91,27 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
     Exposes the latest decoded snapshot (None until the first one arrives)
     and a synchronous `send`, which is exactly the callable ClientProxy needs.
 
-    All eight attributes are load-bearing: the connection's identity (uri,
-    username), its asyncio machinery (loop, websocket, thread), and the
-    shared state the network thread writes and the OpenCV thread reads
-    (snapshot, color, and the lock guarding both). None is redundant with
-    another, so splitting this further would not reduce complexity, only
-    move it behind another name.
+    All attributes are load-bearing: the connection's identity (uri,
+    username, room_action), its asyncio machinery (loop, websocket,
+    thread), and the shared state the network thread writes and the
+    OpenCV thread reads (snapshot, color, room, error, and the lock
+    guarding all four). None is redundant with another, so splitting this
+    further would not reduce complexity, only move it behind another name.
     """
 
-    def __init__(self, uri, username):
+    def __init__(self, uri, username, room_action=None):
+        """room_action -- None (no room: today's ordinary shared game,
+        also what Play produces -- see client/roomdialog.py), or a
+        (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id) pair
+        to send as the second message, right after login (slide 6)."""
         self._uri = uri
         self._username = username
+        self._room_action = room_action
         self._loop = asyncio.new_event_loop()
         self._websocket = None
         self._snapshot = None
         self._color = None  # None until the server's `assigned` message arrives
+        self._room = None  # None unless the server sent a `room` message
         self._error = None  # None unless the server sent an `error` message
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -126,13 +133,25 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         with self._lock:
             return self._color
 
+    def room(self):
+        """-> the room id from the server's `room` message, or None if no
+        room was requested (see room_action) or none has arrived yet --
+        guarded by the same lock as `snapshot`/`color`. Sent by the server
+        strictly before `assigned` on a successful room_create/room_join
+        (see server.py's _handle_client), so by the time color() is no
+        longer None, this is already populated whenever a room was
+        requested at all."""
+        with self._lock:
+            return self._room
+
     def error(self):
         """-> the reason string from the server's `error` message, or None
         if none has arrived (yet, or ever) -- guarded by the same lock as
         `snapshot`/`color`, since the network thread writes all three. A
-        server that refuses the connection (e.g. AlreadyConnectedError,
-        see common.registry) sends this instead of `assigned`, so run()
-        can tell the two apart before ever opening a window."""
+        server that refuses the connection (e.g. AlreadyConnectedError, or
+        "room_exists"/"no_such_room" -- see server.py's _handle_client)
+        sends this instead of `assigned`, so run() can tell the two apart
+        before ever opening a window."""
         with self._lock:
             return self._error
 
@@ -165,6 +184,20 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
             # message on the wire with no race.
             await websocket.send(protocol.dumps(protocol.login(self._username)))
             _log.info("login sent as %s", self._username)
+            # The optional second message the server reads right after
+            # login (see server.py's _read_room_choice) -- sent here, in
+            # the same coroutine right after login, for the identical
+            # no-race reason login itself is sent here rather than via the
+            # public `send`. None (Play, or no room requested at all)
+            # means nothing further is sent, exactly as before Room
+            # existed -- the server's read of this is bounded by a
+            # timeout for precisely that case.
+            if self._room_action is not None:
+                action, name = self._room_action
+                message = (protocol.room_create(name) if action == protocol.ROOM_CREATE
+                            else protocol.room_join(name))
+                await websocket.send(protocol.dumps(message))
+                _log.info("%s sent for room %s", action, name)
             async for raw in websocket:
                 try:
                     message = protocol.loads(raw)
@@ -178,6 +211,10 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                     with self._lock:
                         self._color = message["color"]
                     _log.info("assigned color %s", message["color"])
+                elif message["type"] == protocol.ROOM:
+                    with self._lock:
+                        self._room = message["id"]
+                    _log.info("in room %s", message["id"])
                 elif message["type"] == protocol.ERROR:
                     with self._lock:
                         self._error = message["reason"]
@@ -272,6 +309,14 @@ class _SnapshotBoard:  # pragma: no cover
 _PANEL_WIDTH = 280  # extra canvas width for ScorePanel's text and the mute
 #                     indicator; wide enough by eye against real rendered
 #                     frames (see the manual verification for this fix).
+_PANEL_LINE_H = 26  # matches view.score_panel's own _LINE_H (frozen,
+#                     private to that module, so restated here rather than
+#                     imported) -- gives the mute/room indicator lines
+#                     above ScorePanel's own content the same rhythm, and
+#                     is what keeps them from overlapping it or each other.
+_PANEL_TOP = 15  # y of the first line in the panel strip (mute); room and
+#                  ScorePanel each take the next _PANEL_LINE_H-sized slot
+#                  below it -- see build_client and the draw loop.
 
 
 def _widen_canvas(frame, extra_width):  # pragma: no cover
@@ -299,6 +344,16 @@ def _draw_mute_indicator(frame, muted, x, y):  # pragma: no cover
     frame.put_text(text, x, y, 0.6, color=(255, 255, 255, 255))
 
 
+def _draw_room_indicator(frame, room_id, x, y):  # pragma: no cover
+    """Show the room id at the top of the screen -- slide 6 requires this
+    for both Create and Join, so the player (and anyone they read the id
+    out to) can see which room they are in. A no-op when `room_id` is
+    None: Play's ordinary shared game has no room to show."""
+    if room_id is None:
+        return
+    frame.put_text(f"Room: {room_id}", x, y, 0.6, color=(255, 255, 255, 255))
+
+
 def _prompt_username():  # pragma: no cover
     """Read a non-empty username from the terminal, before the window opens
     (slide 3: login in a shell, not the GUI). Empty input (just pressing
@@ -324,7 +379,7 @@ def _client_log_path(username):  # pragma: no cover
     return f"{_LOG_DIR}/client_{sanitize_for_filename(username)}.log"
 
 
-def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylint: disable=too-many-locals
+def build_client(uri=_SERVER_URI, username="player", room_action=None):  # pragma: no cover, pylint: disable=too-many-locals
     # This is the composition root: the one place that wires every
     # collaborator together, mirroring app.py's build_game(). The local
     # count reflects how many independent parts there are to wire, not
@@ -334,8 +389,11 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylin
     Mirrors app.py's build_game(), except the engine is a ClientProxy, the
     board is a _SnapshotBoard instead of a model.Board, there is a
     ServerLink instead of a GameClock, and score/log/sound/banner are wired
-    through one Bus instead of being called directly."""
-    link = _ServerLink(uri, username)
+    through one Bus instead of being called directly.
+
+    room_action -- passed straight through to _ServerLink; see its
+    docstring."""
+    link = _ServerLink(uri, username, room_action)
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
@@ -349,7 +407,12 @@ def build_client(uri=_SERVER_URI, username="player"):  # pragma: no cover, pylin
                         animation=animations.frame)
 
     observer = GameObserver(_CONFIG)
-    panel = ScorePanel(observer, x=image_w + 20, y=40)
+    # Two _PANEL_LINE_H slots below _PANEL_TOP -- the mute and room
+    # indicators (see the draw loop) each take one of the slots above this,
+    # so ScorePanel's own content starts right after both instead of
+    # overlapping them (room used to be drawn on top of ScorePanel's first
+    # line -- a bug found by testing Step 7).
+    panel = ScorePanel(observer, x=image_w + 20, y=_PANEL_TOP + 2 * _PANEL_LINE_H)
     banner = BannerOverlay()
     sound_player = SoundPlayer(_SOUNDS)
     bus = Bus()
@@ -384,29 +447,58 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
     _ServerLink is read (snapshot()/color() are read the same way, not via
     a condition variable), and this window is short: a login round-trip,
     not a whole game. Called before cv2.namedWindow, so an `error` never
-    gets a window opened for it -- see run()."""
+    gets a window opened for it -- see run().
+
+    Also covers a room request (slide 6) with no separate condition of its
+    own: the server always sends `room` strictly before `assigned` on a
+    successful room_create/room_join (see server.py's _handle_client), so
+    by the time this returns ready, room() is already populated whenever a
+    room was requested at all -- a room refusal arrives as `error`, same as
+    every other refusal this function already waits on."""
     while link.color() is None and link.error() is None:
         time.sleep(poll_interval)
 
 
-def run(username):  # pragma: no cover
-    """Wait for the server to either seat this connection or refuse it,
-    then open the window and run the frame loop until Esc/Q is pressed.
-    Each frame draws whatever snapshot the network thread last received;
-    nothing is drawn before the first one.
+def _room_action_from_dialog(action, room_name):  # pragma: no cover
+    """-> the (protocol.ROOM_CREATE | protocol.ROOM_JOIN, name) pair
+    _ServerLink wants, translating roomdialog's vocabulary (CREATE/JOIN)
+    into protocol's. -> None for PLAY, and, defensively, for any other
+    value ask_room could not actually return -- both mean "no room", the
+    same as skipping the dialog entirely (see roomdialog.ask_room's own
+    docstring on when it returns PLAY)."""
+    if action == CREATE:
+        return protocol.ROOM_CREATE, room_name
+    if action == JOIN:
+        return protocol.ROOM_JOIN, room_name
+    return None
+
+
+def run(username):  # pragma: no cover, pylint: disable=too-many-locals
+    # Local count grew past the threshold with the Room dialog's two
+    # extra names (dialog_action, room_name) on top of what build_client
+    # already returns -- one frame loop genuinely touches this many
+    # independent parts; splitting it up would just move names around,
+    # the same reasoning build_client's own disable above gives.
+    """Show the Room dialog (slide 6), wait for the server to either seat
+    this connection or refuse it, then open the window and run the frame
+    loop until Esc/Q is pressed. Each frame draws whatever snapshot the
+    network thread last received; nothing is drawn before the first one.
 
     `username` is already known by the time this is called -- __main__
     prompts for it first (slide 3: login in a shell, not the GUI) and
     configures per-client file logging from it (see _client_log_path)
     before run() does anything else, so every line this function and
     everything it builds logs lands in that client's own file from the
-    very first one.
+    very first one. The Room dialog comes next, still before any
+    connection is opened -- there is no Home screen in this project, so
+    this is where one would have been (see client/roomdialog.py's module
+    docstring).
 
-    A refusal (e.g. AlreadyConnectedError on the server: this username is
-    already connected to this game from another window) is reported on the
-    terminal and ends the program before any window opens -- there would be
-    nothing for that window to do, since the server never seats it, so
-    opening one would just show an empty board no click can ever affect."""
+    A refusal (e.g. AlreadyConnectedError, "room_exists", or
+    "no_such_room" on the server) is reported on the terminal and ends the
+    program before any window opens -- there would be nothing for that
+    window to do, since the server never seats it, so opening one would
+    just show an empty board no click can ever affect."""
     # cv2 is a compiled C extension, so pylint cannot introspect its
     # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
     # all exist and work at runtime (app.py, frozen and untouched, uses the
@@ -414,8 +506,10 @@ def run(username):  # pragma: no cover
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     _log.info("client starting")
+    dialog_action, room_name = ask_room()
+    room_action = _room_action_from_dialog(dialog_action, room_name)
     controller, renderer, link, bus, clock, banner, panel, sound_player = \
-        build_client(username=username)
+        build_client(username=username, room_action=room_action)
     link.start()
     _wait_for_assignment_or_error(link)
     if link.error() is not None:
@@ -454,8 +548,10 @@ def run(username):  # pragma: no cover
             #   before the canvas is widened below -- see _widen_canvas.
             frame = _widen_canvas(frame, _PANEL_WIDTH)
             panel.draw(frame)
-            _draw_mute_indicator(frame, sound_player.muted,
-                                  frame.img.shape[1] - _PANEL_WIDTH + 20, 15)
+            panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20
+            _draw_mute_indicator(frame, sound_player.muted, panel_x, _PANEL_TOP)
+            _draw_room_indicator(frame, link.room(),
+                                  panel_x, _PANEL_TOP + _PANEL_LINE_H)
             cv2.imshow(_WINDOW, frame.img)
             # Deliberately no `if snapshot.game_over: break` here: the final
             # position, the game-over banner and the game-over sound all

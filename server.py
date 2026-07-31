@@ -80,6 +80,17 @@ _LOG_PATH = "logs/server.log"
 # enough to show the loop is alive without doing that.
 _SUMMARY_INTERVAL_MS = 10_000
 
+# How long to wait for the client's optional room_create/room_join -- its
+# second message, right after login (see _read_room_choice). Play
+# (client/roomdialog.py) means no such message is ever sent, so a plain
+# blocking read here would hang forever on that path;
+# this bounds the wait instead. Generous next to a same-machine/LAN round
+# trip (the client sends it immediately after login, with no user action
+# in between), short enough that a client skipping the dialog entirely
+# sees no perceptible delay -- the terminal prompt and the dialog itself
+# already took far longer than this ever will.
+_ROOM_MESSAGE_TIMEOUT_S = 0.5
+
 # Matches app.py's build_game(): the crystal board asset has a thin decorative
 # frame, so cells are 98px and the first cell starts 13px in, 15px down. The
 # client draws with the same asset, so the pixel positions in every snapshot
@@ -126,24 +137,110 @@ async def _read_username(websocket):  # pragma: no cover
     return message["username"]
 
 
-def _find_or_create_game(registry):  # pragma: no cover
+async def _read_room_choice(websocket):  # pragma: no cover
+    """-> (protocol.ROOM_CREATE, name) or (protocol.ROOM_JOIN, room_id) if
+    the client's optional second message (right after login) is one of
+    those two types within _ROOM_MESSAGE_TIMEOUT_S, else None -- Play
+    (client/roomdialog.py) sends nothing at all, a client that never
+    implements the dialog sends nothing either, and both must fall back to
+    _find_or_create_game exactly as before Room existed, per STEP7_ROOMS.md.
+    A malformed frame or any other message type is also treated as "no room
+    choice" rather than an error: at this point in the handshake the client
+    has nothing else legitimate to send, so this is defence in depth, the
+    same spirit as GameSession.submit silently ignoring an unrecognized
+    message type."""
+    try:
+        raw = await asyncio.wait_for(websocket.recv(), timeout=_ROOM_MESSAGE_TIMEOUT_S)
+    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+        return None
+    try:
+        message = protocol.loads(raw)
+    except protocol.ProtocolError:
+        return None
+    if message["type"] == protocol.ROOM_CREATE:
+        return protocol.ROOM_CREATE, message["name"]
+    if message["type"] == protocol.ROOM_JOIN:
+        return protocol.ROOM_JOIN, message["id"]
+    return None
+
+
+def _find_or_create_game(registry, default_game):
     """This step's placeholder policy: everyone shares one open game, and a
-    new one is created when none is open. Play (slide 5) and Room (slide 6)
-    replace THIS FUNCTION and nothing else -- which is the point of keeping
-    it separate from GameRegistry. "Open" means the game exists and is not
-    yet game_over; a finished game is skipped, which is what fixes the
-    reported bug -- a new arrival never gets handed a permanently-ended
-    game."""
-    for game_id in registry.game_ids():
+    new one is created when none is open. Play (slide 5, its actual name
+    once STEP7_ROOMS.md's follow-up fixes renamed the dialog's Cancel
+    button -- see client/roomdialog.py) and Room (slide 6) replace THIS
+    FUNCTION and nothing else -- which is the point of keeping it separate
+    from GameRegistry.
+
+    `default_game` is a single-key {"id": ...} box, owned by _main() and
+    threaded through the same way `clients` is, remembering the ONE
+    game_id this function itself created for this purpose. Deliberately
+    NOT "scan registry.game_ids() for any open game", which is what this
+    function used to do before Room existed, when every game in the
+    registry WAS by definition the one shared game and that scan was
+    harmless. It is not harmless any more: a room lives in the exact same
+    registry, keyed by its room name, and "any open game" then includes
+    other people's rooms. That is precisely the bug this fixes --
+    reproduced live: a Play click, or a room_join that arrived a hair
+    past _read_room_choice's timeout, would silently land the caller in
+    someone else's still-open room -- sometimes as an unwanted extra
+    viewer (nothing to move), sometimes even in a
+    playable seat of a room they never asked to join. Remembering
+    exactly the id this function handed out itself, rather than
+    re-deriving "the" shared game by scanning, closes that off: a room's
+    id is never guessed at here regardless of how the registry's
+    contents change.
+
+    "Open" means the game exists and is not yet game_over; a finished
+    game is skipped (the same original bug fix this function has always
+    made -- a new arrival never gets handed a permanently-ended game),
+    which is also why the remembered id must be re-checked every call
+    rather than trusted forever."""
+    game_id = default_game["id"]
+    if game_id is not None:
         session = registry.session(game_id)
         if session is not None and not session.game_over:
             return game_id
     game_id = registry.create()
+    default_game["id"] = game_id
     _log.info("created game %s", game_id)
     return game_id
 
 
-async def _handle_client(websocket, registry, clients):  # pragma: no cover
+def _create_room(registry, room_id):
+    """room_create policy (slide 6): a room is exactly "a game two specific
+    people agreed to meet in", and GameRegistry already keys games by id --
+    so the room id simply IS the game id, and creating a room is nothing
+    more than registry.create(game_id=room_id), already-existing machinery.
+    -> room_id on success. -> None if a game with that id already exists --
+    the mentor was explicit that two rooms may not share a name, so this
+    must refuse rather than silently join the caller into someone else's
+    room."""
+    if room_id in registry.game_ids():
+        return None
+    game_id = registry.create(game_id=room_id)
+    _log.info("created room %s", game_id)
+    return game_id
+
+
+def _join_room(registry, room_id):
+    """room_join policy (slide 6). -> room_id if a game with that id
+    exists, else None -- unlike _create_room, joining never creates: a room
+    is joined by its id, typed in by whoever created it and read out to
+    whoever is joining, so a typo must be refused, not silently opened as a
+    brand-new empty room under that name.
+
+    Seating inside the room needs no new code at all once game_id is
+    chosen here: GameRegistry.join already gives "w" to the first username,
+    "b" to the second and "viewer" to everyone after, which is exactly what
+    the slide describes for "inside a room" -- evidence the seam
+    GameRegistry.create(game_id=...) provided was the right one."""
+    if room_id not in registry.game_ids():
+        return None
+    return room_id
+
+
+async def _handle_client(websocket, registry, clients, default_game):  # pragma: no cover
     """One coroutine per connection: read the login username the client
     sends first, join the policy-chosen game, send `assigned` before the
     first `state` so the client knows its role from the outset, register
@@ -155,9 +252,34 @@ async def _handle_client(websocket, registry, clients):  # pragma: no cover
     outright (GameRegistry.AlreadyConnectedError) rather than seated as a
     silent "viewer" -- this connection is closed right away, before it is
     ever added to `clients` or sent anything but the `error`, so it never
-    reaches the command loop or GameRegistry.leave below."""
+    reaches the command loop or GameRegistry.leave below.
+
+    Room (slide 6): the client's optional second message, right after
+    login, is room_create or room_join (see _read_room_choice); when
+    present it picks game_id via _create_room/_join_room instead of
+    _find_or_create_game, and a chosen/created room is confirmed with
+    `room` before anything else -- refused the same way as
+    AlreadyConnectedError (an `error`, then close, before `clients` or
+    GameRegistry.join) if the name is already taken (create) or does not
+    exist (join)."""
     username = await _read_username(websocket)
-    game_id = _find_or_create_game(registry)
+    room_choice = await _read_room_choice(websocket)
+    if room_choice is None:
+        game_id = _find_or_create_game(registry, default_game)
+    else:
+        action, room_id = room_choice
+        if action == protocol.ROOM_CREATE:
+            game_id = _create_room(registry, room_id)
+            refusal = "room_exists"
+        else:
+            game_id = _join_room(registry, room_id)
+            refusal = "no_such_room"
+        if game_id is None:
+            _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
+            await websocket.send(protocol.dumps(protocol.error(refusal)))
+            await websocket.close()
+            return
+        await websocket.send(protocol.dumps(protocol.room(game_id)))
     try:
         color = registry.join(game_id, username)
     except AlreadyConnectedError:
@@ -277,9 +399,10 @@ async def _main():  # pragma: no cover
     # matching king and report winner=None forever.
     registry = GameRegistry(_build_session, bus=bus, king_type=_CONFIG.king_type)
     clients = {}  # websocket -> (game_id, username)
+    default_game = {"id": None}  # see _find_or_create_game
 
     async def handler(websocket):
-        await _handle_client(websocket, registry, clients)
+        await _handle_client(websocket, registry, clients, default_game)
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)
