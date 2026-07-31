@@ -49,7 +49,7 @@ ERROR = "error"
 
 # type -> field names a message of that type must carry.
 _REQUIRED_FIELDS = {
-    LOGIN: ("username",),
+    LOGIN: ("username", "password"),
     MOVE: ("src", "dst"),
     JUMP: ("cell",),
     PLAY: (),
@@ -127,17 +127,28 @@ def _validate_cell(value):
 
 # --- builders: client -> server --------------------------------------------
 
-def login(username):
+def login(username, password=""):
     """`username` is the free-text name the player typed at the client's shell
     prompt before the window opened (slide 3: login in a shell, not the GUI).
     Sent once, as the very first message on a new connection -- before any
     `move`/`jump` -- so the server can log which username took which color.
-    There is no password and no persistence here: this is presentation only
-    (slide 3); the account system is a later step. The client only checks
-    non-emptiness before sending, so `username` is never `""`, but the server
-    does not re-validate it -- a malformed or missing `username` fails at
-    `loads()`, same as any other required field."""
-    return {"type": LOGIN, "username": username}
+
+    `password` (slide 4) is sent as the player typed it, in the clear, over
+    this local WebSocket -- there is no TLS here, and a real deployment
+    would need it (wss://) before this stopped being a real exposure. The
+    server never stores it: it is hashed (common/db.py's create_player/
+    verify_password) the moment it arrives and discarded. Defaults to ""
+    so existing single-argument callers (and tests) keep working; the
+    server's login handling (server.py) treats an unknown username as a
+    signup with whatever password arrives and an existing one as a
+    password check, per slide 4: "first time, whatever password he writes,
+    that is the password."
+
+    The client only checks non-emptiness of `username` before sending, so
+    `username` is never `""`, but the server does not re-validate either
+    field -- a malformed or missing one fails at `loads()`, same as any
+    other required field."""
+    return {"type": LOGIN, "username": username, "password": password}
 
 
 def move(src, dst):

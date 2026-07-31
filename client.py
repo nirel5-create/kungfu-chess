@@ -44,6 +44,7 @@ Run with:  python client.py
 """
 
 import asyncio
+import getpass
 import logging
 import threading
 import time
@@ -92,20 +93,24 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
     and a synchronous `send`, which is exactly the callable ClientProxy needs.
 
     All attributes are load-bearing: the connection's identity (uri,
-    username, room_action), its asyncio machinery (loop, websocket,
-    thread), and the shared state the network thread writes and the
+    username, password, room_action), its asyncio machinery (loop,
+    websocket, thread), and the shared state the network thread writes and the
     OpenCV thread reads (snapshot, color, room, error, and the lock
     guarding all four). None is redundant with another, so splitting this
     further would not reduce complexity, only move it behind another name.
     """
 
-    def __init__(self, uri, username, room_action=None):
-        """room_action -- None (no room: today's ordinary shared game,
+    def __init__(self, uri, username, password, room_action=None):
+        """password -- sent with `username` in the `login` message (slide
+        4); see protocol.login's own docstring for what this does and does
+        not protect against on an unencrypted local WebSocket.
+        room_action -- None (no room: today's ordinary shared game,
         also what Play produces -- see client/roomdialog.py), or a
         (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id) pair
         to send as the second message, right after login (slide 6)."""
         self._uri = uri
         self._username = username
+        self._password = password
         self._room_action = room_action
         self._loop = asyncio.new_event_loop()
         self._websocket = None
@@ -182,7 +187,8 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
             # connection actually being up. Sending it here, as the first
             # thing done once the socket is open, makes it always the first
             # message on the wire with no race.
-            await websocket.send(protocol.dumps(protocol.login(self._username)))
+            await websocket.send(
+                protocol.dumps(protocol.login(self._username, self._password)))
             _log.info("login sent as %s", self._username)
             # The optional second message the server reads right after
             # login (see server.py's _read_room_choice) -- sent here, in
@@ -358,13 +364,25 @@ def _prompt_username():  # pragma: no cover
     """Read a non-empty username from the terminal, before the window opens
     (slide 3: login in a shell, not the GUI). Empty input (just pressing
     Enter) re-prompts rather than being sent -- there is no server-side
-    validation of usernames beyond the field simply being present (no
-    accounts, no password: presentation only, per slide 3), so this is the
-    only check there is."""
+    validation of usernames beyond the field simply being present, so this
+    is the only check there is."""
     while True:
         username = input("Username: ").strip()
         if username:
             return username
+
+
+def _prompt_password():  # pragma: no cover
+    """Read a password from the terminal, right after the username (slide
+    4). getpass.getpass, not input(): it does not echo what is typed,
+    which plain input() would -- a password visible on screen (or in a
+    terminal's scrollback/recording) is exactly the kind of detail a
+    reviewer notices. Unlike the username, an empty password is sent as
+    typed: the server treats a brand-new username as a signup with
+    whatever password arrives (slide 4: "whatever password he writes,
+    that is the password"), empty string included, so there is nothing
+    here to validate."""
+    return getpass.getpass("Password: ")
 
 
 def _client_log_path(username):  # pragma: no cover
@@ -379,7 +397,7 @@ def _client_log_path(username):  # pragma: no cover
     return f"{_LOG_DIR}/client_{sanitize_for_filename(username)}.log"
 
 
-def build_client(uri=_SERVER_URI, username="player", room_action=None):  # pragma: no cover, pylint: disable=too-many-locals
+def build_client(uri=_SERVER_URI, username="player", password="", room_action=None):  # pragma: no cover, pylint: disable=too-many-locals
     # This is the composition root: the one place that wires every
     # collaborator together, mirroring app.py's build_game(). The local
     # count reflects how many independent parts there are to wire, not
@@ -391,9 +409,9 @@ def build_client(uri=_SERVER_URI, username="player", room_action=None):  # pragm
     ServerLink instead of a GameClock, and score/log/sound/banner are wired
     through one Bus instead of being called directly.
 
-    room_action -- passed straight through to _ServerLink; see its
-    docstring."""
-    link = _ServerLink(uri, username, room_action)
+    password, room_action -- passed straight through to _ServerLink; see
+    its docstring."""
+    link = _ServerLink(uri, username, password, room_action)
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
@@ -473,7 +491,7 @@ def _room_action_from_dialog(action, room_name):  # pragma: no cover
     return None
 
 
-def run(username):  # pragma: no cover, pylint: disable=too-many-locals
+def run(username, password):  # pragma: no cover, pylint: disable=too-many-locals
     # Local count grew past the threshold with the Room dialog's two
     # extra names (dialog_action, room_name) on top of what build_client
     # already returns -- one frame loop genuinely touches this many
@@ -484,21 +502,21 @@ def run(username):  # pragma: no cover, pylint: disable=too-many-locals
     loop until Esc/Q is pressed. Each frame draws whatever snapshot the
     network thread last received; nothing is drawn before the first one.
 
-    `username` is already known by the time this is called -- __main__
-    prompts for it first (slide 3: login in a shell, not the GUI) and
-    configures per-client file logging from it (see _client_log_path)
-    before run() does anything else, so every line this function and
-    everything it builds logs lands in that client's own file from the
-    very first one. The Room dialog comes next, still before any
-    connection is opened -- there is no Home screen in this project, so
-    this is where one would have been (see client/roomdialog.py's module
-    docstring).
+    `username`/`password` are already known by the time this is called --
+    __main__ prompts for both first (slide 3/4: login in a shell, not the
+    GUI) and configures per-client file logging from the username (see
+    _client_log_path) before run() does anything else, so every line this
+    function and everything it builds logs lands in that client's own
+    file from the very first one. The Room dialog comes next, still
+    before any connection is opened -- there is no Home screen in this
+    project, so this is where one would have been (see
+    client/roomdialog.py's module docstring).
 
-    A refusal (e.g. AlreadyConnectedError, "room_exists", or
-    "no_such_room" on the server) is reported on the terminal and ends the
-    program before any window opens -- there would be nothing for that
-    window to do, since the server never seats it, so opening one would
-    just show an empty board no click can ever affect."""
+    A refusal (e.g. AlreadyConnectedError, "bad_password", "room_exists",
+    or "no_such_room" on the server) is reported on the terminal and ends
+    the program before any window opens -- there would be nothing for
+    that window to do, since the server never seats it, so opening one
+    would just show an empty board no click can ever affect."""
     # cv2 is a compiled C extension, so pylint cannot introspect its
     # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
     # all exist and work at runtime (app.py, frozen and untouched, uses the
@@ -509,7 +527,7 @@ def run(username):  # pragma: no cover, pylint: disable=too-many-locals
     dialog_action, room_name = ask_room()
     room_action = _room_action_from_dialog(dialog_action, room_name)
     controller, renderer, link, bus, clock, banner, panel, sound_player = \
-        build_client(username=username, room_action=room_action)
+        build_client(username=username, password=password, room_action=room_action)
     link.start()
     _wait_for_assignment_or_error(link)
     if link.error() is not None:
@@ -596,5 +614,6 @@ if __name__ == "__main__":  # pragma: no cover
     # makes there be a file to look at. Shared with server.py, so the two
     # log files cannot drift into different formats.
     _username = _prompt_username()
+    _password = _prompt_password()
     add_file_logging(_client_log_path(_username))
-    run(_username)
+    run(_username, _password)

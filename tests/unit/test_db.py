@@ -125,3 +125,78 @@ def test_upsert_player_query_is_parameterised_not_f_string_interpolated():
     assert "%s" in sql
     assert username not in sql
     assert params[0] == username
+
+
+# --- passwords (Step 8) ------------------------------------------------------
+
+def test_ensure_schema_also_adds_the_password_columns_in_the_same_statement():
+    # The trap: CREATE TABLE IF NOT EXISTS alone would leave an existing
+    # players table (from before Step 8) without pw_hash/salt forever.
+    # Still one statement -- see the "issues one statement" test above,
+    # which this must not break.
+    conn = _FakeConnection()
+    db.ensure_schema(conn)
+    sql, _params = conn.cursor_obj.queries[0]
+    assert "ADD COLUMN IF NOT EXISTS pw_hash" in sql
+    assert "ADD COLUMN IF NOT EXISTS salt" in sql
+
+
+def test_create_player_stores_a_hash_and_the_plaintext_appears_nowhere():
+    conn = _FakeConnection(fetch_result=("alice",))  # a row -> username was free
+    created = db.create_player(conn, "alice", "hunter2")
+    assert created is True
+    sql, params = conn.cursor_obj.queries[0]
+    assert "hunter2" not in sql
+    username, rating, pw_hash, salt = params
+    assert username == "alice"
+    assert rating == db.DEFAULT_RATING
+    assert isinstance(pw_hash, bytes)
+    assert isinstance(salt, bytes)
+    assert pw_hash != b"hunter2"
+    assert b"hunter2" not in pw_hash
+
+
+def test_create_player_returns_false_when_the_username_is_already_taken():
+    conn = _FakeConnection(fetch_result=None)  # ON CONFLICT DO NOTHING -> no row
+    assert db.create_player(conn, "alice", "irrelevant") is False
+
+
+def test_two_users_with_the_same_password_get_different_stored_hashes():
+    conn_a = _FakeConnection(fetch_result=("alice",))
+    conn_b = _FakeConnection(fetch_result=("bob",))
+    db.create_player(conn_a, "alice", "sharedpassword")
+    db.create_player(conn_b, "bob", "sharedpassword")
+    _, _, hash_a, salt_a = conn_a.cursor_obj.queries[0][1]
+    _, _, hash_b, salt_b = conn_b.cursor_obj.queries[0][1]
+    assert salt_a != salt_b
+    assert hash_a != hash_b
+
+
+def test_verify_password_accepts_the_right_password_and_rejects_a_wrong_one():
+    create_conn = _FakeConnection(fetch_result=("alice",))
+    db.create_player(create_conn, "alice", "correct horse")
+    _, _, pw_hash, salt = create_conn.cursor_obj.queries[0][1]
+
+    right_conn = _FakeConnection(fetch_result=(pw_hash, salt))
+    assert db.verify_password(right_conn, "alice", "correct horse") is True
+
+    wrong_conn = _FakeConnection(fetch_result=(pw_hash, salt))
+    assert db.verify_password(wrong_conn, "alice", "wrong password") is False
+
+
+def test_verify_password_returns_false_for_an_unknown_username_without_raising():
+    conn = _FakeConnection(fetch_result=None)
+    assert db.verify_password(conn, "nobody", "whatever") is False
+
+
+# --- ratings (Step 8) ---------------------------------------------------------
+
+def test_update_ratings_issues_one_statement_parameterised():
+    conn = _FakeConnection()
+    db.update_ratings(conn, "alice", "bob", 1216, 1184)
+    assert len(conn.cursor_obj.queries) == 1
+    sql, params = conn.cursor_obj.queries[0]
+    assert "%s" in sql
+    assert "UPDATE players" in sql
+    assert params == ("alice", 1216, "bob", 1184, "alice", "bob")
+    assert conn.committed

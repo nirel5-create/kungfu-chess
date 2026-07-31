@@ -35,11 +35,16 @@ later joiner becomes a "viewer" that can watch but never move. This is the
 GameSession.submit is the half that enforces it.
 
 At startup this also connects to Postgres (common.db) and makes sure the
-players schema exists. Accounts, login, and ELO are later steps -- Step A
-only proves the connection and puts the schema in place. Live games do not
-depend on the database, so a failed connection is logged and the server
-keeps serving games regardless; this is what makes that design-doc claim
-true rather than merely asserted.
+players schema exists (Step A). Step 8 (slide 4) is what actually uses that
+connection while the server is running: a client's `login` now carries a
+password too, checked (or, for a brand-new username, created) against
+common.db before a seat is ever handed out, and every decisive game's
+GAME_END updates both players' ELO rating (common.elo) through the exact
+same subscriber pattern already used to log the winner -- no change to
+GameRegistry, which is what the bus was built for. Live games still do not
+depend on the database: a failed connection, at startup or later, is
+logged and the server (and every login) keeps working regardless -- see
+_connect_db, _authenticate, and _update_ratings_on_game_end.
 
 Run with:  python server.py
 """
@@ -49,7 +54,7 @@ import logging
 
 import websockets
 
-from common import db, net, protocol, topics
+from common import db, elo, net, protocol, topics
 from common.bus import Bus
 from common.logsetup import add_file_logging
 from common.registry import AlreadyConnectedError, GameRegistry
@@ -121,20 +126,48 @@ async def _send_state(websocket, session):  # pragma: no cover
     await websocket.send(protocol.dumps(protocol.state(session.snapshot())))
 
 
-async def _read_username(websocket):  # pragma: no cover
-    """The username from the client's first message (a `login`), or "?" if
-    the connection closes or sends something else before logging in. A
-    missing username never blocks a seat from being assigned -- this is
-    presentation only (slide 3: "just for presentation"), there is no
-    account system to fail against (that is a later step)."""
+async def _read_login(websocket):  # pragma: no cover
+    """The (username, password) from the client's first message (a
+    `login`), or ("?", "") if the connection closes or sends something
+    else before logging in. A missing/malformed login never blocks a seat
+    from being assigned -- there being no account to check a password
+    against is treated the same as a real "?" account always was, before
+    Step 8."""
     try:
         raw = await websocket.recv()
         message = protocol.loads(raw)
     except (protocol.ProtocolError, websockets.ConnectionClosed):
-        return "?"
+        return "?", ""
     if message.get("type") != protocol.LOGIN:
-        return "?"
-    return message["username"]
+        return "?", ""
+    return message["username"], message["password"]
+
+
+def _authenticate(db_conn, username, password):  # pragma: no cover
+    """-> whether `username`/`password` should be let in. A brand-new
+    username creates the account at common.db.DEFAULT_RATING (slide 4:
+    "first time, whatever password he writes, that is the password"); an
+    existing one must match what create_player already refused to
+    overwrite.
+
+    -> True unconditionally when `db_conn` is None (Postgres unreachable
+    at startup, see _connect_db) or when the check itself raises
+    (unreachable mid-session) -- Server_Design.md promises live games do
+    not depend on Postgres, and this is where that promise is either kept
+    or broken: a database outage must not lock every player out, only
+    skip the one check it cannot perform."""
+    if db_conn is None:
+        return True
+    try:
+        if db.create_player(db_conn, username, password):
+            return True
+        return db.verify_password(db_conn, username, password)
+    except Exception:  # pylint: disable=broad-except
+        # Deliberate, same reasoning as _connect_db's own broad except:
+        # any failure here (connection dropped mid-session, Postgres
+        # restarting) must not turn into a rejected login.
+        _log.exception("password check failed for %s; letting them in", username)
+        return True
 
 
 async def _read_room_choice(websocket):  # pragma: no cover
@@ -240,29 +273,38 @@ def _join_room(registry, room_id):
     return room_id
 
 
-async def _handle_client(websocket, registry, clients, default_game):  # pragma: no cover
-    """One coroutine per connection: read the login username the client
-    sends first, join the policy-chosen game, send `assigned` before the
-    first `state` so the client knows its role from the outset, register
-    the connection, then apply every command it sends -- checked against
-    its seat by GameSession.submit -- until it disconnects, at which point
-    it leaves the game (its seat stays held; see GameRegistry.leave).
+async def _handle_client(websocket, registry, clients, default_game, db_conn):  # pragma: no cover, pylint: disable=too-many-locals
+    # One coroutine genuinely touches this many independent pieces of
+    # state (the connection, three collaborators threaded in from _main,
+    # and everything the login/room/command-loop steps compute along the
+    # way) -- splitting it up would just move names around, the same
+    # reasoning client.py's build_client/run give their own disables.
+    """One coroutine per connection: read the login username/password the
+    client sends first, join the policy-chosen game, send `assigned`
+    before the first `state` so the client knows its role from the
+    outset, register the connection, then apply every command it sends --
+    checked against its seat by GameSession.submit -- until it
+    disconnects, at which point it leaves the game (its seat stays held;
+    see GameRegistry.leave).
 
-    A username already connected to the game it would join gets refused
-    outright (GameRegistry.AlreadyConnectedError) rather than seated as a
-    silent "viewer" -- this connection is closed right away, before it is
-    ever added to `clients` or sent anything but the `error`, so it never
-    reaches the command loop or GameRegistry.leave below.
+    A wrong password (_authenticate) or a username already connected to
+    the game it would join (GameRegistry.AlreadyConnectedError) both get
+    refused outright -- an `error`, then close, before `clients` or
+    GameRegistry.join is ever touched, so neither reaches the command loop
+    or GameRegistry.leave below.
 
     Room (slide 6): the client's optional second message, right after
     login, is room_create or room_join (see _read_room_choice); when
     present it picks game_id via _create_room/_join_room instead of
     _find_or_create_game, and a chosen/created room is confirmed with
-    `room` before anything else -- refused the same way as
-    AlreadyConnectedError (an `error`, then close, before `clients` or
-    GameRegistry.join) if the name is already taken (create) or does not
-    exist (join)."""
-    username = await _read_username(websocket)
+    `room` before anything else -- refused the same way if the name is
+    already taken (create) or does not exist (join)."""
+    username, password = await _read_login(websocket)
+    if not _authenticate(db_conn, username, password):
+        _log.warning("refused %s: bad password", username)
+        await websocket.send(protocol.dumps(protocol.error("bad_password")))
+        await websocket.close()
+        return
     room_choice = await _read_room_choice(websocket)
     if room_choice is None:
         game_id = _find_or_create_game(registry, default_game)
@@ -363,34 +405,92 @@ async def _tick_loop(registry, clients):  # pragma: no cover
 
 
 def _connect_db():  # pragma: no cover
-    """Connect to Postgres and make sure the players schema exists. Live
-    games do not depend on the database (Server_Design.md section 10), so a
-    failed connection is logged and swallowed here rather than raised --
-    the caller starts the game server either way."""
+    """Connect to Postgres and make sure the players schema exists
+    (including Step 8's pw_hash/salt columns). -> the connection, for the
+    server to keep and reuse for the rest of its life -- login checks
+    (_authenticate) and rating updates (_update_ratings_on_game_end) both
+    need one. -> None on any failure, logged and swallowed rather than
+    raised, so the caller starts the game server either way (Server_
+    Design.md section 10: live games do not depend on the database) --
+    every later user of this connection already treats None as "skip the
+    check this needs a database for"."""
     try:
         conn = db.connect()
         db.ensure_schema(conn)
         _log.info("connected to Postgres and verified the players schema")
+        return conn
     except Exception:  # pylint: disable=broad-except
         # Deliberate: any failure here (unset DATABASE_URL, unreachable
         # host, auth failure) must not stop the game server from starting,
         # per the design doc's claim that live games do not depend on the
         # database.
         _log.exception("could not reach Postgres; continuing without it")
+        return None
+
+
+def _update_ratings_on_game_end(db_conn, payload):
+    """GAME_END subscriber (slide 4's rating half): reads `winner`/`seats`
+    from the payload GameRegistry already publishes and writes new ELO
+    ratings for the "w" and "b" seats. This is the only new subscriber
+    Step 8 needed -- GameRegistry does not change, exactly as its own
+    module docstring says the bus exists to make possible.
+
+    Does nothing when `winner` is None (an uncounted game -- see
+    common.elo.new_ratings' own docstring), when either seat is empty (a
+    game that never had two players), or when `db_conn` is None (Postgres
+    unreachable -- see _connect_db). Ignores "viewer" seats: `seats` may
+    hold more than two usernames, only "w"/"b" affect rating.
+
+    Never raises into the registry that published this event -- wrapped in
+    a broad except, same reasoning as _authenticate's: a database failure
+    here must not stop the tick loop that published GAME_END, only skip
+    recording this one game's result (write-behind, per Server_Design.md).
+    A missing player row (get_rating returns None -- possible if the
+    database was unreachable at THAT player's login, see _authenticate)
+    is treated the same way: logged and skipped, not a crash."""
+    if db_conn is None:
+        return
+    winner = payload["winner"]
+    if winner is None:
+        return
+    seats = payload["seats"]
+    white_user = next((user for user, color in seats.items() if color == "w"), None)
+    black_user = next((user for user, color in seats.items() if color == "b"), None)
+    if white_user is None or black_user is None:
+        return
+    try:
+        white_rating = db.get_rating(db_conn, white_user)
+        black_rating = db.get_rating(db_conn, black_user)
+        if white_rating is None or black_rating is None:
+            _log.warning("skipping rating update for game %s: unknown player(s)",
+                         payload["game_id"])
+            return
+        new_white, new_black = elo.new_ratings(white_rating, black_rating, winner)
+        db.update_ratings(db_conn, white_user, black_user, new_white, new_black)
+        _log.info("rating update: %s %d->%d, %s %d->%d",
+                   white_user, white_rating, new_white,
+                   black_user, black_rating, new_black)
+    except Exception:  # pylint: disable=broad-except
+        _log.exception("rating update failed for game %s", payload["game_id"])
 
 
 async def _main():  # pragma: no cover
     _log.info("starting kung-fu chess server")
-    _connect_db()
+    db_conn = _connect_db()
     bus = Bus()
     # Nothing else subscribes to GAME_START yet -- publishing it
     # unconditionally from here on is what lets ELO (a later step) attach
     # as a bus subscriber, with no change to GameRegistry or this file.
-    # GAME_END gets one subscriber here, purely to log the winner: this is
-    # the only place that knows how to turn a game_id into a log line, so
-    # it belongs here rather than in GameRegistry, which does not log.
+    # GAME_END gets two subscribers here: one purely to log the winner
+    # (this is the only place that knows how to turn a game_id into a log
+    # line, so it belongs here rather than in GameRegistry, which does not
+    # log), and _update_ratings_on_game_end (Step 8) -- the entire ELO
+    # half of slide 4 is this one extra subscribe() call, exactly as
+    # GameRegistry's own module docstring says the bus was built to allow.
     bus.subscribe(topics.GAME_END, lambda payload: _log.info(
         "game %s ended, winner=%s", payload["game_id"], payload["winner"]))
+    bus.subscribe(topics.GAME_END,
+                  lambda payload: _update_ratings_on_game_end(db_conn, payload))
     # king_type is passed explicitly rather than left at GameRegistry's own
     # default: both currently say "K", but that is one fact declared twice.
     # If _CONFIG's king token ever changed, an implicit default here would
@@ -402,7 +502,7 @@ async def _main():  # pragma: no cover
     default_game = {"id": None}  # see _find_or_create_game
 
     async def handler(websocket):
-        await _handle_client(websocket, registry, clients, default_game)
+        await _handle_client(websocket, registry, clients, default_game, db_conn)
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)

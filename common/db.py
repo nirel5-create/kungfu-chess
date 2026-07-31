@@ -1,27 +1,49 @@
-"""Postgres connection and schema for player ratings.
+"""Postgres connection and schema for player accounts and ratings.
 
-Server_Design.md section 10, Step A: prove the server and Postgres can talk,
-and put the players schema in place. This module does not implement
-accounts, login, or ELO arithmetic -- those are later steps; it only opens a
-connection, ensures the schema exists, and reads/writes a rating.
+Server_Design.md section 10, Step A first proved the server and Postgres
+could talk. Step 8 (slide 4) is what actually uses that connection: an
+account is a username with a password (hashed, never stored in the clear)
+and a rating that moves by ELO after every decisive game.
 
-What this module owns: opening a connection from DATABASE_URL, creating the
-players schema if absent, and reading/writing a player's rating.
-What it does NOT own: password hashing, ELO arithmetic, sessions, or any
-game logic.
+What this module owns: opening a connection from DATABASE_URL, creating and
+upgrading the players schema, hashing/verifying passwords, and reading/
+writing ratings.
+What it does NOT own: the ELO arithmetic itself (common/elo.py), deciding
+WHEN a rating changes (server.py's GAME_END subscriber), or sessions.
 """
 
+import hashlib
+import hmac
 import os
+import secrets
 
 import psycopg
 
 DEFAULT_RATING = 1200
 
+# OWASP's Password Storage Cheat Sheet's long-standing baseline for
+# PBKDF2-HMAC-SHA256 (their current guidance goes higher still, but that
+# turns every login -- and every test that exercises one -- into a
+# noticeably slow call; this is still a real, deliberately-chosen cost,
+# not a placeholder). hashlib's implementation is C, so this is tens of
+# milliseconds, not seconds.
+_PBKDF2_ITERATIONS = 100_000
+_SALT_BYTES = 16
+
+# One statement, not two DDL calls: CREATE TABLE IF NOT EXISTS on its own
+# only handles a database that has never seen this table before. Checked
+# against this project's own dev volume, not assumed: the players table
+# created back in Step A already exists without pw_hash/salt, so on an
+# upgrade this statement must ALSO add those columns to a table that is
+# already there -- ALTER TABLE ... ADD COLUMN IF NOT EXISTS is what makes
+# that idempotent (safe to run again on a database that already has them).
 _ENSURE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS players (
     username TEXT PRIMARY KEY,
     rating INTEGER NOT NULL DEFAULT 1200
-)
+);
+ALTER TABLE players ADD COLUMN IF NOT EXISTS pw_hash BYTEA;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS salt BYTEA;
 """
 
 _GET_RATING_SQL = "SELECT rating FROM players WHERE username = %s"
@@ -33,6 +55,29 @@ _GET_RATING_SQL = "SELECT rating FROM players WHERE username = %s"
 _UPSERT_PLAYER_SQL = """
 INSERT INTO players (username, rating) VALUES (%s, %s)
 ON CONFLICT (username) DO UPDATE SET rating = EXCLUDED.rating
+"""
+
+# Same race as _UPSERT_PLAYER_SQL, same fix: two connections racing to
+# register the same brand-new username must not both succeed. DO NOTHING
+# plus RETURNING is what lets create_player tell "I created it" apart from
+# "someone/something already had that name" from a single round trip.
+_CREATE_PLAYER_SQL = """
+INSERT INTO players (username, rating, pw_hash, salt) VALUES (%s, %s, %s, %s)
+ON CONFLICT (username) DO NOTHING
+RETURNING username
+"""
+
+_GET_PASSWORD_SQL = "SELECT pw_hash, salt FROM players WHERE username = %s"
+
+# One UPDATE, not two: both ratings change or neither does. A CASE keyed
+# on username, rather than two separate statements sharing one commit, is
+# what makes this a single round trip as well as a single transaction.
+_UPDATE_RATINGS_SQL = """
+UPDATE players SET rating = CASE username
+    WHEN %s THEN %s
+    WHEN %s THEN %s
+END
+WHERE username IN (%s, %s)
 """
 
 
@@ -61,7 +106,10 @@ def _connect(url):  # pragma: no cover -- needs a live Postgres to exercise
 
 
 def ensure_schema(conn):
-    """Create the players table if it does not already exist."""
+    """Create the players table if it does not already exist, and add the
+    pw_hash/salt columns (Step 8) if the table exists but predates them --
+    see _ENSURE_SCHEMA_SQL's own comment for why plain CREATE TABLE IF NOT
+    EXISTS is not enough by itself."""
     with conn.cursor() as cur:
         cur.execute(_ENSURE_SCHEMA_SQL)
     conn.commit()
@@ -87,3 +135,65 @@ def upsert_player(conn, username, rating=DEFAULT_RATING):
         cur.execute(_UPSERT_PLAYER_SQL, (username, rating))
     conn.commit()
     return rating
+
+
+def _hash_password(password, salt):
+    """-> the PBKDF2-HMAC-SHA256 digest of `password` under `salt`, as
+    bytes. Never called with a fresh salt when checking an existing
+    password -- see verify_password -- since a different salt always
+    produces a different digest even for the same password."""
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+
+
+def create_player(conn, username, password):
+    """Create a brand-new account for `username`/`password`, at
+    DEFAULT_RATING. -> True if the account was created, False if
+    `username` already exists (the caller should fall back to
+    verify_password instead -- see server.py's login handling).
+
+    Never stores `password` itself: a fresh random salt
+    (secrets.token_bytes) and the PBKDF2 digest of the two together are
+    what actually go into the row, as parameters -- the plaintext appears
+    in neither the SQL text nor, once hashed, in the parameters either."""
+    salt = secrets.token_bytes(_SALT_BYTES)
+    pw_hash = _hash_password(password, salt)
+    with conn.cursor() as cur:
+        cur.execute(_CREATE_PLAYER_SQL, (username, DEFAULT_RATING, pw_hash, salt))
+        created = cur.fetchone() is not None
+    conn.commit()
+    return created
+
+
+def verify_password(conn, username, password):
+    """-> whether `password` matches the stored password for `username`.
+    False, not raised, if `username` does not exist -- a caller does not
+    need a separate existence check first.
+
+    Recomputes the digest from the STORED salt (a fresh one would never
+    match, even for the right password) and compares with
+    hmac.compare_digest, not ==: `==` on bytes short-circuits at the first
+    differing byte, which leaks how many leading bytes matched through
+    how long the comparison took -- exactly the timing side-channel
+    constant-time comparison exists to close."""
+    with conn.cursor() as cur:
+        cur.execute(_GET_PASSWORD_SQL, (username,))
+        row = cur.fetchone()
+    if row is None:
+        return False
+    stored_hash, salt = row
+    candidate_hash = _hash_password(password, bytes(salt))
+    return hmac.compare_digest(bytes(stored_hash), candidate_hash)
+
+
+def update_ratings(conn, white_user, black_user, white_rating, black_rating):
+    """Write both players' new ratings in the one statement above
+    (_UPDATE_RATINGS_SQL) -- never two separate UPDATEs, which could leave
+    one applied and the other not if something failed in between.
+    Parameterised (%s), never string-formatted, for the same reason as
+    get_rating/upsert_player."""
+    with conn.cursor() as cur:
+        cur.execute(_UPDATE_RATINGS_SQL, (
+            white_user, white_rating, black_user, black_rating,
+            white_user, black_user,
+        ))
+    conn.commit()
