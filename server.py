@@ -85,16 +85,26 @@ _LOG_PATH = "logs/server.log"
 # enough to show the loop is alive without doing that.
 _SUMMARY_INTERVAL_MS = 10_000
 
-# How long to wait for the client's optional room_create/room_join -- its
-# second message, right after login (see _read_room_choice). Play
-# (client/roomdialog.py) means no such message is ever sent, so a plain
-# blocking read here would hang forever on that path;
-# this bounds the wait instead. Generous next to a same-machine/LAN round
-# trip (the client sends it immediately after login, with no user action
-# in between), short enough that a client skipping the dialog entirely
-# sees no perceptible delay -- the terminal prompt and the dialog itself
-# already took far longer than this ever will.
-_ROOM_MESSAGE_TIMEOUT_S = 0.5
+# How long to wait for the client's optional second message, right after
+# login (see _read_room_choice) -- room_create, room_join, or protocol.
+# play() (client/roomdialog.py's Play button, sent explicitly rather than
+# left to a client's silence). A plain blocking read here would hang
+# forever on a client that sends nothing at all (one that never
+# implements the dialog), so this bounds the wait instead.
+#
+# Deliberately generous, not a network-round-trip guess: the client now
+# checks its login before ever showing the Room dialog (a real OS window
+# a human answers -- see client.py's run()), and only sends this second
+# message once that dialog closes. A short timeout tuned for a network
+# round trip would routinely expire while a real person is still reading
+# the dialog, silently defaulting them into the shared game instead of
+# the room they were about to create or join -- that used to be safe to
+# ignore only because the dialog was answered BEFORE the connection even
+# opened. 120s is long enough that no one filling in a room name and
+# clicking a button will ever hit it; a connection that goes quiet for
+# that long has effectively been abandoned, and defaulting it to the
+# shared game is a reasonable, non-hanging fallback either way.
+_ROOM_MESSAGE_TIMEOUT_S = 120
 
 # Matches app.py's build_game(): the crystal board asset has a thin decorative
 # frame, so cells are 98px and the first cell starts 13px in, 15px down. The
@@ -162,25 +172,33 @@ def _authenticate(db_conn, username, password):  # pragma: no cover
         if db.create_player(db_conn, username, password):
             return True
         return db.verify_password(db_conn, username, password)
-    except Exception:  # pylint: disable=broad-except
+    except Exception as exc:  # pylint: disable=broad-except
         # Deliberate, same reasoning as _connect_db's own broad except:
         # any failure here (connection dropped mid-session, Postgres
-        # restarting) must not turn into a rejected login.
-        _log.exception("password check failed for %s; letting them in", username)
+        # restarting) must not turn into a rejected login -- expected and
+        # handled, not a crash, which is exactly why this is a one-line
+        # warning naming the reason rather than _log.exception's full
+        # traceback: a stack trace here would misrepresent a handled
+        # condition as one, and train a reader to skim past a real one.
+        _log.warning("password check failed for %s (%s); letting them in, "
+                     "play continues without the database", username, exc)
         return True
 
 
 async def _read_room_choice(websocket):  # pragma: no cover
     """-> (protocol.ROOM_CREATE, name) or (protocol.ROOM_JOIN, room_id) if
     the client's optional second message (right after login) is one of
-    those two types within _ROOM_MESSAGE_TIMEOUT_S, else None -- Play
-    (client/roomdialog.py) sends nothing at all, a client that never
-    implements the dialog sends nothing either, and both must fall back to
-    _find_or_create_game exactly as before Room existed, per STEP7_ROOMS.md.
-    A malformed frame or any other message type is also treated as "no room
-    choice" rather than an error: at this point in the handshake the client
-    has nothing else legitimate to send, so this is defence in depth, the
-    same spirit as GameSession.submit silently ignoring an unrecognized
+    those two types within _ROOM_MESSAGE_TIMEOUT_S, else None. None covers
+    three cases identically: an explicit protocol.play() (client/
+    roomdialog.py's Play button), a client that never implements the
+    dialog and sends nothing at all, and a client that sent something
+    this function does not recognize -- all fall back to
+    _find_or_create_game exactly as before Room existed, per
+    STEP7_ROOMS.md. A malformed frame is treated the same way rather than
+    as an error: at this point in the handshake the client has nothing
+    else legitimate to send beyond these three, so this is defence in
+    depth, the same spirit as GameSession.submit silently ignoring an
+    unrecognized
     message type."""
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=_ROOM_MESSAGE_TIMEOUT_S)
@@ -419,12 +437,16 @@ def _connect_db():  # pragma: no cover
         db.ensure_schema(conn)
         _log.info("connected to Postgres and verified the players schema")
         return conn
-    except Exception:  # pylint: disable=broad-except
+    except Exception as exc:  # pylint: disable=broad-except
         # Deliberate: any failure here (unset DATABASE_URL, unreachable
         # host, auth failure) must not stop the game server from starting,
         # per the design doc's claim that live games do not depend on the
-        # database.
-        _log.exception("could not reach Postgres; continuing without it")
+        # database -- expected and handled, not a crash, so a one-line
+        # warning naming the reason is what belongs in the log, not
+        # _log.exception's full traceback. Keep the traceback for
+        # failures that are actually unexpected; this is not one.
+        _log.warning("Postgres unavailable (%s); starting without it, "
+                     "no accounts or ratings until it is reachable", exc)
         return None
 
 

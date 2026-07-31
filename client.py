@@ -93,25 +93,30 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
     and a synchronous `send`, which is exactly the callable ClientProxy needs.
 
     All attributes are load-bearing: the connection's identity (uri,
-    username, password, room_action), its asyncio machinery (loop,
+    username, password), its asyncio machinery (loop,
     websocket, thread), and the shared state the network thread writes and the
     OpenCV thread reads (snapshot, color, room, error, and the lock
     guarding all four). None is redundant with another, so splitting this
     further would not reduce complexity, only move it behind another name.
-    """
 
-    def __init__(self, uri, username, password, room_action=None):
+    The room choice (slide 6) is deliberately NOT part of this constructor
+    any more: it used to be sent as an automatic second message, right
+    after login, inside _receive_loop. That meant the Room dialog
+    (client/roomdialog.py, a real OS window a human interacts with) had to
+    be shown and answered BEFORE this class even existed -- before the
+    connection was opened, before login was checked -- so a rejected
+    password was only discovered after the player had already filled in
+    the dialog for nothing. Now login is sent alone, on connect, and
+    run() sends the room choice afterward through the ordinary public
+    `send` below, once the dialog has actually closed."""
+
+    def __init__(self, uri, username, password):
         """password -- sent with `username` in the `login` message (slide
         4); see protocol.login's own docstring for what this does and does
-        not protect against on an unencrypted local WebSocket.
-        room_action -- None (no room: today's ordinary shared game,
-        also what Play produces -- see client/roomdialog.py), or a
-        (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id) pair
-        to send as the second message, right after login (slide 6)."""
+        not protect against on an unencrypted local WebSocket."""
         self._uri = uri
         self._username = username
         self._password = password
-        self._room_action = room_action
         self._loop = asyncio.new_event_loop()
         self._websocket = None
         self._snapshot = None
@@ -190,20 +195,12 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
             await websocket.send(
                 protocol.dumps(protocol.login(self._username, self._password)))
             _log.info("login sent as %s", self._username)
-            # The optional second message the server reads right after
-            # login (see server.py's _read_room_choice) -- sent here, in
-            # the same coroutine right after login, for the identical
-            # no-race reason login itself is sent here rather than via the
-            # public `send`. None (Play, or no room requested at all)
-            # means nothing further is sent, exactly as before Room
-            # existed -- the server's read of this is bounded by a
-            # timeout for precisely that case.
-            if self._room_action is not None:
-                action, name = self._room_action
-                message = (protocol.room_create(name) if action == protocol.ROOM_CREATE
-                            else protocol.room_join(name))
-                await websocket.send(protocol.dumps(message))
-                _log.info("%s sent for room %s", action, name)
+            # The room choice (protocol.PLAY / ROOM_CREATE / ROOM_JOIN) is
+            # the optional second message the server reads after login
+            # (see server.py's _read_room_choice) -- sent later, from
+            # run(), through the public `send` below, once the Room
+            # dialog has actually closed. Not sent from here any more --
+            # see this class's own docstring for why.
             async for raw in websocket:
                 try:
                     message = protocol.loads(raw)
@@ -397,7 +394,7 @@ def _client_log_path(username):  # pragma: no cover
     return f"{_LOG_DIR}/client_{sanitize_for_filename(username)}.log"
 
 
-def build_client(uri=_SERVER_URI, username="player", password="", room_action=None):  # pragma: no cover, pylint: disable=too-many-locals
+def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no cover, pylint: disable=too-many-locals
     # This is the composition root: the one place that wires every
     # collaborator together, mirroring app.py's build_game(). The local
     # count reflects how many independent parts there are to wire, not
@@ -409,9 +406,9 @@ def build_client(uri=_SERVER_URI, username="player", password="", room_action=No
     ServerLink instead of a GameClock, and score/log/sound/banner are wired
     through one Bus instead of being called directly.
 
-    password, room_action -- passed straight through to _ServerLink; see
-    its docstring."""
-    link = _ServerLink(uri, username, password, room_action)
+    password -- passed straight through to _ServerLink; see its
+    docstring."""
+    link = _ServerLink(uri, username, password)
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
@@ -456,6 +453,31 @@ def build_client(uri=_SERVER_URI, username="player", password="", room_action=No
     return controller, renderer, link, bus, clock, banner, panel, sound_player
 
 
+def _wait_for_login_error(link, timeout_s=2.0, poll_interval=0.02):  # pragma: no cover
+    """Block for up to `timeout_s`, or until the network thread records a
+    refusal (error() becomes non-None) -- whichever is first. Called right
+    after link.start(), before the Room dialog is ever shown, so a bad
+    password is caught before the player wastes any effort on a dialog
+    that was never going to matter. Only "bad_password" can arrive this
+    early: AlreadyConnectedError (server.py's _handle_client) is scoped to
+    a specific game_id, which is not known until the room choice is sent
+    below, so that refusal cannot fire before this function returns --
+    it is still caught, just by _wait_for_assignment_or_error afterward.
+
+    Does NOT wait for color(): unlike _wait_for_assignment_or_error below,
+    nothing has been assigned yet at this point, on purpose -- the server
+    only proceeds past the login check to seat a color once it also knows
+    the room choice (see server.py's _handle_client), which this function
+    is called before making. `timeout_s` only needs to comfortably cover
+    _authenticate's own cost (one hashed password comparison, tens of
+    milliseconds) -- the server sends `error` for a bad password the
+    moment it knows, with no artificial delay of its own, so this is a
+    generous multiple of that, not a guess at network latency."""
+    deadline = time.time() + timeout_s
+    while link.error() is None and time.time() < deadline:
+        time.sleep(poll_interval)
+
+
 def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
     """Block until the network thread has recorded either a seat (color()
     becomes non-None, from the server's `assigned` message) or a refusal
@@ -463,9 +485,16 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
     whichever the server sends first; the two are mutually exclusive on the
     wire. Polling a plain lock-guarded field matches how the rest of
     _ServerLink is read (snapshot()/color() are read the same way, not via
-    a condition variable), and this window is short: a login round-trip,
-    not a whole game. Called before cv2.namedWindow, so an `error` never
-    gets a window opened for it -- see run().
+    a condition variable). Called before cv2.namedWindow, so an `error`
+    never gets a window opened for it -- see run().
+
+    Called after the room choice (protocol.PLAY/ROOM_CREATE/ROOM_JOIN) has
+    already been sent -- see run() -- so this window, unlike
+    _wait_for_login_error above, has no fixed bound: the server may itself
+    be waiting on a slow human at the OTHER end of a room dialog (see
+    server.py's _ROOM_MESSAGE_TIMEOUT_S), and there is nothing more useful
+    for this end to do than keep waiting for that same human's own
+    verdict.
 
     Also covers a room request (slide 6) with no separate condition of its
     own: the server always sends `room` strictly before `assigned` on a
@@ -477,18 +506,17 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
         time.sleep(poll_interval)
 
 
-def _room_action_from_dialog(action, room_name):  # pragma: no cover
-    """-> the (protocol.ROOM_CREATE | protocol.ROOM_JOIN, name) pair
-    _ServerLink wants, translating roomdialog's vocabulary (CREATE/JOIN)
-    into protocol's. -> None for PLAY, and, defensively, for any other
-    value ask_room could not actually return -- both mean "no room", the
-    same as skipping the dialog entirely (see roomdialog.ask_room's own
-    docstring on when it returns PLAY)."""
+def _room_message_from_dialog(action, room_name):  # pragma: no cover
+    """-> the protocol message to send for the Room dialog's outcome:
+    room_create/room_join for Create/Join, or protocol.play() -- slide
+    5's own message, sent explicitly rather than left implicit -- for
+    Play, and, defensively, for any other value ask_room could not
+    actually return."""
     if action == CREATE:
-        return protocol.ROOM_CREATE, room_name
+        return protocol.room_create(room_name)
     if action == JOIN:
-        return protocol.ROOM_JOIN, room_name
-    return None
+        return protocol.room_join(room_name)
+    return protocol.play()
 
 
 def run(username, password):  # pragma: no cover, pylint: disable=too-many-locals
@@ -497,7 +525,8 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
     # already returns -- one frame loop genuinely touches this many
     # independent parts; splitting it up would just move names around,
     # the same reasoning build_client's own disable above gives.
-    """Show the Room dialog (slide 6), wait for the server to either seat
+    """Wait for the server to verify login, THEN show the Room dialog
+    (slide 6) and send its outcome, wait again for the server to seat
     this connection or refuse it, then open the window and run the frame
     loop until Esc/Q is pressed. Each frame draws whatever snapshot the
     network thread last received; nothing is drawn before the first one.
@@ -507,10 +536,18 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
     GUI) and configures per-client file logging from the username (see
     _client_log_path) before run() does anything else, so every line this
     function and everything it builds logs lands in that client's own
-    file from the very first one. The Room dialog comes next, still
-    before any connection is opened -- there is no Home screen in this
-    project, so this is where one would have been (see
-    client/roomdialog.py's module docstring).
+    file from the very first one.
+
+    Login is checked BEFORE the Room dialog is shown, not after: a manual
+    test typed a wrong password, filled in the whole Create/Join/Play
+    dialog, and only then saw "bad_password" -- wasted effort on a dialog
+    that was never going to matter. _wait_for_login_error catches that
+    (and any other login-time refusal) first; only once it finds none
+    does the dialog open at all, and the dialog's outcome becomes the
+    connection's second message, exactly where Room already expected it
+    (see server.py's _read_room_choice) -- just sent later than it used
+    to be, once a human has actually finished answering it, rather than
+    automatically the instant the socket opened.
 
     A refusal (e.g. AlreadyConnectedError, "bad_password", "room_exists",
     or "no_such_room" on the server) is reported on the terminal and ends
@@ -524,11 +561,15 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     _log.info("client starting")
-    dialog_action, room_name = ask_room()
-    room_action = _room_action_from_dialog(dialog_action, room_name)
     controller, renderer, link, bus, clock, banner, panel, sound_player = \
-        build_client(username=username, password=password, room_action=room_action)
+        build_client(username=username, password=password)
     link.start()
+    _wait_for_login_error(link)
+    if link.error() is not None:
+        print(f"Connection refused by server: {link.error()}")
+        return
+    dialog_action, room_name = ask_room()
+    link.send(_room_message_from_dialog(dialog_action, room_name))
     _wait_for_assignment_or_error(link)
     if link.error() is not None:
         print(f"Connection refused by server: {link.error()}")
