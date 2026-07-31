@@ -47,6 +47,34 @@ def test_game_over_reflects_the_engine_after_a_king_capture():
     assert session.game_over is True
 
 
+# --- force_game_over (Step 9, slide 5.2 auto-resign) ------------------------
+
+def test_force_game_over_makes_game_over_true_with_no_capture():
+    session, _board = _one_rook_session()
+    assert session.game_over is False
+    session.force_game_over()
+    assert session.game_over is True
+
+
+def test_force_game_over_makes_the_snapshot_report_game_over_too():
+    # game_over the property is not what the client ever sees on the wire --
+    # only the snapshot's own game_over field is (see protocol.encode_snapshot)
+    # -- so this is the one that actually has to change for the client's
+    # existing game-over handling to fire on an auto-resign.
+    session, _board = _one_rook_session()
+    assert session.snapshot().game_over is False
+    session.force_game_over()
+    assert session.snapshot().game_over is True
+
+
+def test_force_game_over_does_not_disturb_anything_else_about_the_snapshot():
+    session, _board = _one_rook_session()
+    before = session.snapshot()
+    session.force_game_over()
+    after = session.snapshot()
+    assert after == before._replace(game_over=True)
+
+
 # --- ownership (Step 4) -------------------------------------------------
 
 def _two_rook_session():

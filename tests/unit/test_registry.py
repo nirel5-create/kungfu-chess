@@ -3,7 +3,9 @@ import pytest
 from common import protocol, topics
 from common.bus import Bus
 from common.net import GameSession
-from common.registry import GAME_END_LINGER_MS, AlreadyConnectedError, GameRegistry
+from common.registry import (
+    DISCONNECT_GRACE_MS, GAME_END_LINGER_MS, AlreadyConnectedError, GameRegistry,
+)
 from engine.game import GameEngine
 from model.board import Board
 from tests.helpers import CFG, wait_for
@@ -20,6 +22,12 @@ class _FakeSession:
 
     def advance(self, ms):
         self.advanced_ms.append(ms)
+
+    def force_game_over(self):
+        """Real GameSession.force_game_over's stand-in (Step 9's
+        auto-resign calls this unconditionally) -- game_over is a plain
+        attribute here, not a property, so setting it directly is enough."""
+        self.game_over = True
 
 
 def _capturing_session():
@@ -264,3 +272,180 @@ def test_with_bus_none_nothing_raises_and_lifecycle_still_works():
     assert registry.join(game_id, "alice") == "w"
     registry.advance(100)
     assert registry.session(game_id) is not None
+
+
+# --- disconnect countdown / auto-resign (Step 9, slide 5.2) ----------------
+
+def test_leave_by_a_seated_player_starts_a_countdown_reported_by_countdown_ms():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
+    assert registry.countdown_ms(game_id) == {"alice": DISCONNECT_GRACE_MS}
+
+
+def test_leave_by_a_viewer_starts_no_countdown():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+    registry.join(game_id, "carol")  # viewer
+    registry.leave(game_id, "carol")
+    assert registry.countdown_ms(game_id) == {}
+
+
+def test_advance_reduces_the_remaining_time():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
+    registry.advance(1000)
+    assert registry.countdown_ms(game_id) == {"alice": DISCONNECT_GRACE_MS - 1000}
+
+
+def test_rejoining_before_the_grace_period_clears_the_countdown_entirely():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
+    registry.advance(5000)
+    registry.join(game_id, "alice")
+    assert registry.countdown_ms(game_id) == {}
+    # Confirms the entry was actually removed, not merely reset to 0 and
+    # still ticking -- either would satisfy the check above on its own.
+    registry.advance(1000)
+    assert registry.countdown_ms(game_id) == {}
+
+
+def test_reaching_the_grace_period_publishes_game_end_with_the_opponent_as_winner():
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_FakeSession, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+    registry.leave(game_id, "alice")
+    registry.advance(DISCONNECT_GRACE_MS)
+    assert len(published) == 1
+    payload = published[0]
+    assert payload["game_id"] == game_id
+    assert payload["winner"] == "b"
+    assert payload["seats"] == {"alice": "w", "bob": "b"}
+
+
+def test_both_players_away_past_the_grace_period_gives_winner_none():
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_FakeSession, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+    registry.leave(game_id, "alice")
+    registry.leave(game_id, "bob")
+    registry.advance(DISCONNECT_GRACE_MS)
+    assert len(published) == 1
+    assert published[0]["winner"] is None
+
+
+def test_a_game_already_ended_by_king_capture_does_not_also_auto_resign():
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_capturing_session, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+
+    session = registry.session(game_id)
+    session.submit(protocol.move((0, 1), (0, 2)))  # captures black's king
+    registry.advance(wait_for(1))  # ends the game by king capture
+
+    registry.leave(game_id, "alice")  # starts a countdown, harmlessly
+    registry.advance(DISCONNECT_GRACE_MS)  # must not also auto-resign
+
+    assert len(published) == 1
+    assert published[0]["winner"] == "w"  # from the king capture, not a resign
+
+
+def test_game_end_is_published_exactly_once_when_a_countdown_expires():
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_FakeSession, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.leave(game_id, "alice")
+    registry.advance(DISCONNECT_GRACE_MS)
+    registry.advance(1000)
+    registry.advance(1000)
+    assert len(published) == 1
+
+
+def test_game_is_removed_once_the_linger_period_elapses_after_auto_resign():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.leave(game_id, "alice")
+    registry.advance(DISCONNECT_GRACE_MS - 100)  # not yet expired
+    # The call that crosses the threshold counts its own ms toward the
+    # linger period too (documented on advance() and already exercised by
+    # test_a_finished_game_is_still_present_before_the_linger_period_
+    # elapses above), so it is kept small here on purpose -- a single
+    # advance(DISCONNECT_GRACE_MS) would also already satisfy the much
+    # shorter GAME_END_LINGER_MS and delete the game in the same call.
+    registry.advance(100)
+    assert registry.session(game_id) is not None
+
+    registry.advance(GAME_END_LINGER_MS - 100)
+    assert registry.session(game_id) is None
+    assert game_id not in registry.game_ids()
+
+
+def test_countdown_ms_on_an_unknown_game_returns_an_empty_mapping():
+    registry = GameRegistry(_FakeSession)
+    assert registry.countdown_ms("no-such-game") == {}
+
+
+def test_a_lone_player_whose_countdown_expires_with_no_opponent_ever_seated_gets_no_winner():
+    # A game where only one player ever joined (the other seat was never
+    # taken -- the ordinary "waiting for an opponent" state) must not
+    # declare the empty seat the winner once the lone player's countdown
+    # expires: nobody was ever present on that side either, so this ends
+    # the same way "both away" does -- winner=None -- rather than crediting
+    # a color nobody ever played.
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_FakeSession, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w; "b" is never taken
+    registry.leave(game_id, "alice")
+    registry.advance(DISCONNECT_GRACE_MS)
+    assert len(published) == 1
+    assert published[0]["winner"] is None
+
+
+# --- has_connected_players (Step 9 bug fix) ---------------------------------
+
+def test_has_connected_players_is_true_right_after_joining():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    assert registry.has_connected_players(game_id) is True
+
+
+def test_has_connected_players_is_false_once_everyone_has_left():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
+    assert registry.has_connected_players(game_id) is False
+
+
+def test_has_connected_players_is_false_for_an_unknown_game():
+    registry = GameRegistry(_FakeSession)
+    assert registry.has_connected_players("no-such-game") is False

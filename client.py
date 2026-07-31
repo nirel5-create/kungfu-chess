@@ -54,7 +54,7 @@ import numpy as np
 import websockets
 
 from client.events import GameEventSource
-from client.overlay import BannerOverlay
+from client.overlay import BannerOverlay, CountdownOverlay
 from client.roomdialog import CREATE, JOIN, ask_room
 from client.sound import SoundPlayer
 from common import net, protocol, topics
@@ -77,6 +77,9 @@ _BOARD_PNG = _ASSETS + "/board.png"
 _SOUNDS = _ASSETS + "/sounds"
 _SERVER_URI = "ws://localhost:8765"
 _LOG_DIR = "logs"
+# How long a countdown is still considered live with no new message -- see
+# _ServerLink.countdown()'s own docstring for why this cannot be 0.
+_COUNTDOWN_STALE_S = 2.0
 
 _log = logging.getLogger(__name__)
 
@@ -123,6 +126,8 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._color = None  # None until the server's `assigned` message arrives
         self._room = None  # None unless the server sent a `room` message
         self._error = None  # None unless the server sent an `error` message
+        self._countdown_seconds = None  # None unless a countdown is live -- see countdown()
+        self._countdown_updated_at = None  # time.time() of the last countdown message
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -164,6 +169,29 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         before ever opening a window."""
         with self._lock:
             return self._error
+
+    def countdown(self):
+        """-> the seconds remaining on the opponent's disconnect countdown
+        (slide 5.2), or None when nothing is currently counting down.
+
+        The server only sends a `countdown` message when the second value
+        changes (see server.py's _tick_loop) -- roughly once a second while
+        one is active -- not every tick, and it never sends an explicit
+        "cleared" message when the opponent reconnects; the opponent
+        simply stops appearing in the per-tick broadcast. So "no message
+        this exact instant" cannot mean "cleared" on its own, or this
+        would flicker off between every pair of per-second updates. Instead
+        a countdown is considered live as long as one was reported within
+        `_COUNTDOWN_STALE_S` -- a comfortable multiple of that ~1s cadence
+        -- and considered cleared once that window has passed with nothing
+        new, which is what actually happens the moment the opponent
+        reconnects and the server stops sending updates for them."""
+        with self._lock:
+            if self._countdown_seconds is None:
+                return None
+            if time.time() - self._countdown_updated_at > _COUNTDOWN_STALE_S:
+                return None
+            return self._countdown_seconds
 
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
@@ -222,6 +250,11 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                     with self._lock:
                         self._error = message["reason"]
                     _log.warning("refused by server: %s", message["reason"])
+                elif message["type"] == protocol.COUNTDOWN:
+                    with self._lock:
+                        self._countdown_seconds = message["seconds"]
+                        self._countdown_updated_at = time.time()
+                    _log.info("countdown: %ds", message["seconds"])
             _log.info("disconnected from %s", self._uri)
 
 
@@ -429,6 +462,12 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # line -- a bug found by testing Step 7).
     panel = ScorePanel(observer, x=image_w + 20, y=_PANEL_TOP + 2 * _PANEL_LINE_H)
     banner = BannerOverlay()
+    # Not wired to the bus like banner above: its number comes straight from
+    # link.countdown() every frame in run()'s loop (see CountdownOverlay's
+    # own docstring for why it has no state machine of its own to feed via
+    # a subscriber), not from anything the server-driven SNAPSHOT/GAME_END
+    # topics carry.
+    countdown_overlay = CountdownOverlay()
     sound_player = SoundPlayer(_SOUNDS)
     bus = Bus()
     # promotions is passed explicitly, the same way server.py passes
@@ -450,7 +489,7 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     bus.subscribe(topics.GAME_START, banner.on_game_start)
     bus.subscribe(topics.GAME_END, banner.on_game_end)
 
-    return controller, renderer, link, bus, clock, banner, panel, sound_player
+    return controller, renderer, link, bus, clock, banner, countdown_overlay, panel, sound_player
 
 
 def _wait_for_login_error(link, timeout_s=2.0, poll_interval=0.02):  # pragma: no cover
@@ -561,7 +600,7 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     _log.info("client starting")
-    controller, renderer, link, bus, clock, banner, panel, sound_player = \
+    controller, renderer, link, bus, clock, banner, countdown_overlay, panel, sound_player = \
         build_client(username=username, password=password)
     link.start()
     _wait_for_login_error(link)
@@ -605,6 +644,8 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
             frame = renderer.render(snapshot, elapsed_ms)
             banner.draw(frame, elapsed_ms)  # centered on the true board size,
             #   before the canvas is widened below -- see _widen_canvas.
+            countdown_overlay.draw(frame, link.countdown())  # same reason:
+            #   drawn over the true board, not the widened panel strip.
             frame = _widen_canvas(frame, _PANEL_WIDTH)
             panel.draw(frame)
             panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20

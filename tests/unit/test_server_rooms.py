@@ -56,7 +56,7 @@ def test_join_room_refuses_and_does_not_create_a_nonexistent_room():
 def test_find_or_create_game_creates_one_on_first_call():
     registry = _registry()
     default_game = {"id": None}
-    game_id = _find_or_create_game(registry, default_game)
+    game_id = _find_or_create_game(registry, default_game, "alice")
     assert game_id in registry.game_ids()
     assert default_game["id"] == game_id
 
@@ -64,8 +64,12 @@ def test_find_or_create_game_creates_one_on_first_call():
 def test_find_or_create_game_reuses_the_same_game_across_calls():
     registry = _registry()
     default_game = {"id": None}
-    first = _find_or_create_game(registry, default_game)
-    second = _find_or_create_game(registry, default_game)
+    first = _find_or_create_game(registry, default_game, "alice")
+    # Real usage always joins right after -- see server.py's
+    # _handle_client -- which is what makes the game "have a connected
+    # player" for the next call to find.
+    registry.join(first, "alice")
+    second = _find_or_create_game(registry, default_game, "bob")
     assert first == second
 
 
@@ -77,15 +81,48 @@ def test_find_or_create_game_never_returns_a_room():
     registry = _registry()
     room_id = _create_room(registry, "cocorico")
     default_game = {"id": None}
-    game_id = _find_or_create_game(registry, default_game)
+    game_id = _find_or_create_game(registry, default_game, "alice")
     assert game_id != room_id
 
 
 def test_find_or_create_game_creates_a_fresh_one_once_the_remembered_game_ends():
     registry = _registry()
     default_game = {"id": None}
-    first = _find_or_create_game(registry, default_game)
+    first = _find_or_create_game(registry, default_game, "alice")
     registry.session(first).game_over = True
-    second = _find_or_create_game(registry, default_game)
+    second = _find_or_create_game(registry, default_game, "alice")
     assert second != first
     assert default_game["id"] == second
+
+
+def test_find_or_create_game_skips_a_default_game_with_no_connected_players():
+    # The bug this guards against, found by manual testing: a player
+    # joined the default game as white, closed the window (the seat is
+    # kept, not freed -- see GameRegistry.join/leave), and a stranger who
+    # arrived afterward used to be handed that same abandoned game,
+    # waiting for an opponent who had already left.
+    registry = _registry()
+    default_game = {"id": None}
+    first = _find_or_create_game(registry, default_game, "alice")
+    registry.join(first, "alice")
+    registry.leave(first, "alice")  # alice disconnects; her seat stays
+
+    second = _find_or_create_game(registry, default_game, "bob")  # a stranger
+
+    assert second != first
+    assert default_game["id"] == second
+
+
+def test_find_or_create_game_still_returns_the_original_player_to_their_seat():
+    # The exception that preserves reconnecting: the same abandoned game
+    # as above, but this time it is alice herself coming back, not a
+    # stranger -- she must land back in the game she left, not a new one.
+    registry = _registry()
+    default_game = {"id": None}
+    first = _find_or_create_game(registry, default_game, "alice")
+    registry.join(first, "alice")
+    registry.leave(first, "alice")
+
+    second = _find_or_create_game(registry, default_game, "alice")
+
+    assert second == first

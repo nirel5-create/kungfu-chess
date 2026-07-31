@@ -215,7 +215,7 @@ async def _read_room_choice(websocket):  # pragma: no cover
     return None
 
 
-def _find_or_create_game(registry, default_game):
+def _find_or_create_game(registry, default_game, username):
     """This step's placeholder policy: everyone shares one open game, and a
     new one is created when none is open. Play (slide 5, its actual name
     once STEP7_ROOMS.md's follow-up fixes renamed the dialog's Cancel
@@ -242,15 +242,28 @@ def _find_or_create_game(registry, default_game):
     id is never guessed at here regardless of how the registry's
     contents change.
 
-    "Open" means the game exists and is not yet game_over; a finished
-    game is skipped (the same original bug fix this function has always
-    made -- a new arrival never gets handed a permanently-ended game),
-    which is also why the remembered id must be re-checked every call
-    rather than trusted forever."""
+    "Open" means the game exists, is not yet game_over, AND has at least
+    one currently-connected player -- UNLESS `username` already holds a
+    seat in it, in which case it is "open" regardless. That exception is
+    what preserves reconnecting to the default game (a disconnected
+    player's seat is kept, per GameRegistry.join, precisely so they can
+    come back to it -- Step 9's countdown gives that window a deadline
+    but does not remove the seat before it), which already works and must
+    keep working. Without the exception, a game everyone had actually
+    left is skipped (a bug found by manual testing: a stranger arriving
+    at the default game used to be handed one still holding a seated but
+    long-gone player, and sat there waiting for an opponent who was never
+    coming back) -- a finished game is skipped the same way it always was
+    (the original bug fix this function has always made -- a new arrival
+    never gets handed a permanently-ended game), which is also why the
+    remembered id must be re-checked every call rather than trusted
+    forever."""
     game_id = default_game["id"]
     if game_id is not None:
         session = registry.session(game_id)
-        if session is not None and not session.game_over:
+        already_seated = registry.color_of(game_id, username) is not None
+        if (session is not None and not session.game_over
+                and (registry.has_connected_players(game_id) or already_seated)):
             return game_id
     game_id = registry.create()
     default_game["id"] = game_id
@@ -325,7 +338,7 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn):  
         return
     room_choice = await _read_room_choice(websocket)
     if room_choice is None:
-        game_id = _find_or_create_game(registry, default_game)
+        game_id = _find_or_create_game(registry, default_game, username)
     else:
         action, room_id = room_choice
         if action == protocol.ROOM_CREATE:
@@ -370,9 +383,21 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn):  
         clients.pop(websocket, None)
         registry.leave(game_id, username)
         _log.info("%s disconnected from game %s", username, game_id)
+        if color in ("w", "b"):
+            # A viewer leaving starts no countdown at all (see
+            # GameRegistry.leave), so nothing to log for that case --
+            # `color` is exactly the seat check that already distinguishes
+            # them, already known from the join() call above, no extra
+            # registry query needed.
+            _log.info("countdown started for %s in game %s", username, game_id)
 
 
-async def _tick_loop(registry, clients):  # pragma: no cover
+async def _tick_loop(registry, clients):  # pragma: no cover, pylint: disable=too-many-locals
+    # A tick genuinely touches this many independent pieces (the summary
+    # counters, the per-game client list reused for two different
+    # broadcasts, the countdown bookkeeping) -- splitting it up would just
+    # move names around, the same reasoning other disables in this file
+    # give.
     """Advance every game by a fixed step on a fixed interval, then push
     each game's own snapshot only to the clients sitting in that game.
     Today every client shares one game (see _find_or_create_game); once
@@ -381,11 +406,23 @@ async def _tick_loop(registry, clients):  # pragma: no cover
     dropped the connection) is removed from `clients` rather than stopping
     the broadcast for everyone else.
 
+    Also broadcasts the disconnect countdown (slide 5.2): for every game
+    with an away player (GameRegistry.countdown_ms), send protocol.
+    countdown(seconds) -- whole seconds, not milliseconds, and only when
+    the second actually changes for that (game, username) pair, the same
+    "send on change, not on every tick" reasoning _SUMMARY_INTERVAL_MS
+    already uses. `last_countdown_seconds` remembers what was last sent
+    per (game_id, username) and is rebuilt from scratch every tick, which
+    is what makes a countdown that stops (the player reconnected, or the
+    game ended) simply stop appearing in it -- nothing to explicitly
+    clean up.
+
     Also logs a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
     connected clients) -- never the per-tick broadcast itself; see
     _SUMMARY_INTERVAL_MS's comment for why not."""
     tick_count = 0
     ms_since_summary = 0
+    last_countdown_seconds = {}  # (game_id, username) -> last-sent whole seconds
     while True:
         await asyncio.sleep(_TICK_MS / 1000)
         registry.advance(_TICK_MS)
@@ -406,18 +443,32 @@ async def _tick_loop(registry, clients):  # pragma: no cover
             _log.info("tick=%d live_games=%d connected_clients=%d",
                        tick_count, len(registry.game_ids()), len(clients))
         dead = set()
+        current_countdown_seconds = {}
         for game_id in registry.game_ids():
             session = registry.session(game_id)
             if session is None:
                 continue
+            game_clients = [websocket for websocket, (client_game_id, _username)
+                             in clients.items() if client_game_id == game_id]
             message = protocol.dumps(protocol.state(session.snapshot()))
-            for websocket, (client_game_id, _username) in clients.items():
-                if client_game_id != game_id:
-                    continue
+            for websocket in game_clients:
                 try:
                     await websocket.send(message)
                 except websockets.ConnectionClosed:
                     dead.add(websocket)
+            for username, ms_left in registry.countdown_ms(game_id).items():
+                seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
+                key = (game_id, username)
+                current_countdown_seconds[key] = seconds
+                if last_countdown_seconds.get(key) == seconds:
+                    continue
+                countdown_message = protocol.dumps(protocol.countdown(seconds))
+                for websocket in game_clients:
+                    try:
+                        await websocket.send(countdown_message)
+                    except websockets.ConnectionClosed:
+                        dead.add(websocket)
+        last_countdown_seconds = current_countdown_seconds
         for websocket in dead:
             clients.pop(websocket, None)
 

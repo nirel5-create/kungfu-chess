@@ -45,6 +45,7 @@ class GameSession:
 
     def __init__(self, engine):
         self._engine = engine
+        self._forced_game_over = False  # set by force_game_over(); see its docstring
 
     def submit(self, message, color=ANY_COLOR):
         """Apply one already-decoded command dict (already validated by
@@ -126,14 +127,33 @@ class GameSession:
         """Move the engine's simulated clock forward by exactly `ms`."""
         self._engine.wait(ms)
 
+    def force_game_over(self):
+        """Mark this session over without going through the engine's own
+        capture-based ending -- used by GameRegistry's disconnect
+        auto-resign (slide 5.2), which ends a game no king was captured
+        in. The (frozen) engine is never told and keeps whatever position
+        it already had; `game_over` and `snapshot()` below both reflect
+        the forced end immediately, which is what lets the client's
+        existing game-over handling (driven entirely by a snapshot's
+        `game_over` field) show "GAME OVER" and stop accepting moves for
+        an auto-resign exactly as it already does for a real capture,
+        with no separate client-side code path."""
+        self._forced_game_over = True
+
     def snapshot(self):
-        """-> the engine's current GameSnapshot."""
-        return self._engine.snapshot()
+        """-> the engine's current GameSnapshot, with `game_over` forced
+        True once force_game_over() has been called -- see its docstring
+        for why the engine's own snapshot does not already say so."""
+        snapshot = self._engine.snapshot()
+        if self._forced_game_over and not snapshot.game_over:
+            return snapshot._replace(game_over=True)
+        return snapshot
 
     @property
     def game_over(self):
-        """-> whether the engine has ended the game."""
-        return self._engine.game_over
+        """-> whether the engine has ended the game, or force_game_over()
+        was called -- see its docstring for why these can differ."""
+        return self._engine.game_over or self._forced_game_over
 
 
 class ClientProxy:

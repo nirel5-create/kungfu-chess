@@ -29,6 +29,20 @@ _BACKING_COLOR = (0, 0, 0)  # opaque black; alpha appended below if needed
 _BACKING_PADDING = 16
 
 
+def _draw_with_backing(frame, text, x, y, color):
+    """Paint `text` at (x, y) over a filled dark backing rectangle sized to
+    it -- shared by BannerOverlay and CountdownOverlay below, since both
+    need the same readable-over-any-square-color trick (see this module's
+    docstring)."""
+    (text_w, text_h), baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
+    channels = frame.img.shape[2]
+    backing_color = _BACKING_COLOR + (255,) if channels == 4 else _BACKING_COLOR
+    top_left = (x - _BACKING_PADDING, y - text_h - _BACKING_PADDING)
+    bottom_right = (x + text_w + _BACKING_PADDING, y + baseline + _BACKING_PADDING)
+    cv2.rectangle(frame.img, top_left, bottom_right, backing_color, thickness=-1)
+    frame.put_text(text, x, y, _FONT_SIZE, color=color, thickness=_THICKNESS)
+
+
 class BannerOverlay:
     """Subscribe on_game_start to topics.GAME_START and on_game_end to
     topics.GAME_END. Shows "GO" or "GAME OVER" for `duration_ms`, then
@@ -79,11 +93,29 @@ class BannerOverlay:
             return
         height, width = frame.img.shape[:2]
         x, y = width // 2 - 80, height // 2
-        (text_w, text_h), baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
-        channels = frame.img.shape[2]
-        backing_color = _BACKING_COLOR + (255,) if channels == 4 else _BACKING_COLOR
-        top_left = (x - _BACKING_PADDING, y - text_h - _BACKING_PADDING)
-        bottom_right = (x + text_w + _BACKING_PADDING, y + baseline + _BACKING_PADDING)
-        cv2.rectangle(frame.img, top_left, bottom_right, backing_color, thickness=-1)
-        frame.put_text(text, x, y, _FONT_SIZE,
-                        color=(255, 255, 255, 255), thickness=_THICKNESS)
+        _draw_with_backing(frame, text, x, y, color=(255, 255, 255, 255))
+
+
+class CountdownOverlay:  # pylint: disable=too-few-public-methods
+    """Draws the disconnect countdown (slide 5.2) over the board -- not the
+    side panel, per Step 9: the opponent has vanished and the game is about
+    to be decided without a move, so this must be impossible to miss.
+
+    Reuses BannerOverlay's drawing pattern (the shared _draw_with_backing
+    above) but not its state machine: a countdown is a live, externally
+    updated number -- driven by _ServerLink.countdown() in client.py's run()
+    -- not a one-shot announcement with a fixed duration, so there is
+    nothing here to time out on its own."""
+
+    def draw(self, frame, seconds):
+        """Draw `seconds` centered near the top of the board. A no-op --
+        frame untouched -- when `seconds` is None, which is how the caller
+        says there is currently nothing to show (nobody away, or the away
+        player just reconnected -- see _ServerLink.countdown's docstring)."""
+        if seconds is None:
+            return
+        text = f"Opponent disconnected: {seconds}s"
+        width = frame.img.shape[1]
+        (text_w, _text_h), _baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
+        x, y = (width - text_w) // 2, 60
+        _draw_with_backing(frame, text, x, y, color=(60, 60, 255, 255))

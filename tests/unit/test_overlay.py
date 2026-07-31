@@ -1,17 +1,20 @@
 import numpy as np
 
-from client.overlay import BannerOverlay
+from client.overlay import BannerOverlay, CountdownOverlay
 
 
 class _FakeFrame:
-    def __init__(self):
-        # A real (small) array, not just an object with a `.shape` --
-        # draw() now writes the backing rectangle straight onto frame.img
-        # with cv2.rectangle (see overlay.py's module docstring), which
-        # needs an actual mutable buffer to draw into, not merely
-        # something that reports a shape. put_text stays a pure spy below:
-        # only the rectangle touches real pixels.
-        self.img = np.zeros((100, 100, 4), dtype=np.uint8)
+    def __init__(self, width=100, height=100):
+        # A real array, not just an object with a `.shape` -- draw() now
+        # writes the backing rectangle straight onto frame.img with
+        # cv2.rectangle (see overlay.py's module docstring), which needs an
+        # actual mutable buffer to draw into, not merely something that
+        # reports a shape. put_text stays a pure spy below: only the
+        # rectangle touches real pixels. width/height default to a small
+        # 100x100 (enough for BannerOverlay's short banners below); the
+        # CountdownOverlay tests pass a board-sized frame instead, since
+        # its longer text would not fit inside 100px.
+        self.img = np.zeros((height, width, 4), dtype=np.uint8)
         self.calls = []
 
     def put_text(self, *args, **kwargs):
@@ -69,5 +72,35 @@ def test_draw_paints_a_dark_backing_rectangle_behind_the_text():
     overlay.draw(frame, 0)
     assert frame.img.any()  # started all-zero; the backing changed pixels
     center = frame.img[50, 20]  # inside the rectangle, left of the text glyphs
+    assert tuple(center[:3]) == (0, 0, 0)
+    assert center[3] == 255
+
+
+# --- CountdownOverlay (Step 9, slide 5.2) ------------------------------------
+
+def test_countdown_overlay_draws_nothing_when_seconds_is_none():
+    overlay = CountdownOverlay()
+    frame = _FakeFrame()
+    overlay.draw(frame, None)
+    assert frame.calls == []
+    assert not frame.img.any()
+
+
+def test_countdown_overlay_calls_put_text_when_seconds_is_given():
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)  # board-sized: see _FakeFrame
+    overlay.draw(frame, 5)
+    assert len(frame.calls) == 1
+
+
+def test_countdown_overlay_paints_a_backing_rectangle_behind_the_text():
+    # Same readability fix as BannerOverlay's own rectangle test above,
+    # reused via _draw_with_backing -- checked on the pixels since the
+    # rectangle is drawn straight onto frame.img, not through put_text.
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, 5)
+    center = frame.img[55, 450]  # near the vertical/horizontal center of
+    #   the text's backing box -- see draw()'s x, y computation.
     assert tuple(center[:3]) == (0, 0, 0)
     assert center[3] == 255

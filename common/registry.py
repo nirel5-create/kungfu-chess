@@ -32,6 +32,7 @@ import uuid
 from common import topics
 
 GAME_END_LINGER_MS = 3000  # how long a finished game stays before removal
+DISCONNECT_GRACE_MS = 20000  # slide 5.2: auto-resign 20s after a disconnect
 
 # GameSession exposes no way to read a game's Config: it holds a private
 # GameEngine, which itself holds a private Config, and neither has a public
@@ -69,6 +70,9 @@ class _Game:  # pylint: disable=too-few-public-methods
         self.connected = set()   # usernames currently connected
         self.ended = False       # has GAME_END already been published?
         self.linger_ms = 0       # ms accumulated since ended became True
+        self.away_ms = {}        # username -> ms disconnected so far,
+        #                          for currently-away SEATED ("w"/"b")
+        #                          players only -- see leave()/join()/advance()
 
 
 class GameRegistry:
@@ -117,11 +121,19 @@ class GameRegistry:
 
         A username that already has a seat AND IS NOT CURRENTLY CONNECTED
         gets that same seat back -- this is what makes reconnecting work,
-        since leave() below does not erase the seat. Only the SEAT is made
-        stable here; a *timed* reconnect window (a grace period before the
-        seat is forfeited) is a later step. This step deliberately only
-        guarantees the seat does not silently vanish on disconnect, nothing
-        about how long it waits.
+        since leave() below does not erase the seat. This also clears any
+        disconnect countdown running for that seat (away_ms, see leave()/
+        advance()) -- what makes the reconnect window REAL rather than
+        nominal: without clearing it, a player who reconnects with seconds
+        to spare would still auto-resign later, at the ORIGINAL 20s
+        deadline, since advance() has no other way to learn they came
+        back.
+
+        The reconnect window is bounded now (DISCONNECT_GRACE_MS, see
+        advance()): come back before the countdown finishes, or the game
+        auto-resigns for the missing color and this seat's owner has
+        nothing left to reconnect to. The seat dict entry itself still
+        never vanishes on its own -- only the game around it can end.
 
         A username that already has a seat AND IS CURRENTLY CONNECTED is a
         second, simultaneous connection under the same name, not a
@@ -148,6 +160,7 @@ class GameRegistry:
             if username in game.connected:
                 raise AlreadyConnectedError(username)
             game.connected.add(username)
+            game.away_ms.pop(username, None)
             return game.seats[username]
         color = self._next_open_seat(game)
         game.seats[username] = color
@@ -166,10 +179,18 @@ class GameRegistry:
         """Mark `username` as disconnected from `game_id`. Does not free
         the seat -- see join(). A no-op for an unknown game or an unknown
         username: a disconnect can arrive after a game has already been
-        removed, and that is normal, not exceptional."""
+        removed, and that is normal, not exceptional.
+
+        Slide 5.2: if `username` holds "w" or "b", this also starts their
+        disconnect countdown at 0 -- see advance(), which ticks every
+        entry in away_ms toward DISCONNECT_GRACE_MS and auto-resigns
+        whoever reaches it. A viewer leaving starts nothing: a spectator
+        walking away is not a forfeit, the slide's rule is about players."""
         game = self._games.get(game_id)
         if game is not None:
             game.connected.discard(username)
+            if game.seats.get(username) in _SEAT_COLORS:
+                game.away_ms[username] = 0
 
     def color_of(self, game_id, username):
         """-> the seat held by `username` in `game_id`, or None if that
@@ -189,15 +210,54 @@ class GameRegistry:
         """-> a tuple of every currently-live game id."""
         return tuple(self._games)
 
+    def countdown_ms(self, game_id):
+        """-> {username: ms remaining before auto-resign}, for every
+        seated player currently away in `game_id` (slide 5.2). Empty when
+        nobody is away, and empty -- not an error -- for an unknown
+        game_id too, the same tolerance color_of/session already show for
+        a game that does not exist. The server broadcasts this (as whole
+        seconds, not milliseconds -- see server.py's _tick_loop) so the
+        opponent can see the count on screen."""
+        game = self._games.get(game_id)
+        if game is None:
+            return {}
+        return {username: max(0, DISCONNECT_GRACE_MS - away)
+                for username, away in game.away_ms.items()}
+
+    def has_connected_players(self, game_id):
+        """-> whether any username is currently connected to `game_id` --
+        False for an unknown game_id too, the same tolerance color_of
+        shows. Exists so server.py's _find_or_create_game can ask this
+        without reaching into GameRegistry's internals -- added for a bug
+        found by manual testing: a stranger arriving at the default game
+        used to be handed an abandoned one (every seat kept, per join()'s
+        own design, but nobody actually connected to it), left waiting
+        for an opponent who had already left."""
+        game = self._games.get(game_id)
+        if game is None:
+            return False
+        return bool(game.connected)
+
     def advance(self, ms):
         """Tick every live game's session by `ms`, publish GAME_END exactly
-        once for each game that just became game_over, and remove any game
-        whose linger period has run past GAME_END_LINGER_MS.
+        once for each game that just became game_over (by king capture or
+        by auto-resign, slide 5.2), and remove any game whose linger
+        period has run past GAME_END_LINGER_MS.
 
         The linger period is counted from the same call in which a game
         becomes game_over -- this call's `ms` already counts toward it, not
         just later calls' -- so behaviour does not depend on how finely the
-        caller chops time into advance() calls."""
+        caller chops time into advance() calls.
+
+        Ordering: a king capture is checked first, and auto-resign
+        (_advance_countdowns) is only even considered when the game is
+        NOT already ended -- by either mechanism, this call or an earlier
+        one. That single `elif` is what guarantees a game already ended
+        never auto-resigns on top, and what stops a countdown expiring in
+        the very same call as a king capture from publishing GAME_END
+        twice: the king-capture branch already set game.ended, so the
+        elif is skipped outright, exactly as `if X: ... elif Y` always
+        skips Y once X has already run."""
         for game_id, game in list(self._games.items()):
             game.session.advance(ms)
             if game.session.game_over and not game.ended:
@@ -207,10 +267,72 @@ class GameRegistry:
                     "winner": self._winner_of(game.session),
                     "seats": dict(game.seats),
                 })
+            elif not game.ended:
+                self._advance_countdowns(game_id, game, ms)
             if game.ended:
                 game.linger_ms += ms
                 if game.linger_ms >= GAME_END_LINGER_MS:
                     del self._games[game_id]
+
+    def _advance_countdowns(self, game_id, game, ms):
+        """Add `ms` to every seated player's disconnect countdown
+        (game.away_ms) and auto-resign (slide 5.2) if any of them reaches
+        DISCONNECT_GRACE_MS. Only called from advance() for a game that
+        is not already ended -- see its own docstring for why that
+        ordering matters.
+
+        The winner is whichever SEATED color did NOT just time out; if
+        both did (both players away past the grace period), the winner is
+        None -- a game nobody was present for is not counted, the same
+        rule Server_Design.md already documents for a king capture with
+        no clear winner. An empty, never-seated color (e.g. a lone player
+        who disconnected before anyone ever joined as the other color) is
+        excluded from consideration entirely rather than counted as
+        "remaining" -- otherwise a game with only one player who ever
+        connected would nonsensically declare the empty seat the winner
+        instead of ending with None, which is what actually happened:
+        nobody was present on that side either. Ends the game the same
+        way a king capture does (game.ended = True, one GAME_END publish
+        with the same {game_id, winner, seats} shape) so ratings update
+        through the existing GAME_END subscriber with no second code
+        path."""
+        if not game.away_ms:
+            return
+        expired = set()
+        for username in game.away_ms:
+            game.away_ms[username] += ms
+            if game.away_ms[username] >= DISCONNECT_GRACE_MS:
+                expired.add(username)
+        if not expired:
+            return
+        seated_colors = [color for color in _SEAT_COLORS
+                          if self._username_at(game, color) is not None]
+        expired_colors = {color for color in seated_colors
+                           if self._username_at(game, color) in expired}
+        remaining_colors = [c for c in seated_colors if c not in expired_colors]
+        winner = remaining_colors[0] if len(remaining_colors) == 1 else None
+        game.session.force_game_over()  # no king was captured, so the
+        #   (frozen) engine has no idea this game just ended -- see
+        #   GameSession.force_game_over's own docstring for why this is
+        #   what makes the client's existing game-over handling fire.
+        game.ended = True
+        self._publish(topics.GAME_END, {
+            "game_id": game_id,
+            "winner": winner,
+            "seats": dict(game.seats),
+        })
+
+    @staticmethod
+    def _username_at(game, color):
+        """-> the username seated at `color` in `game`, or None if that
+        seat has never been taken. A small lookup helper for
+        _advance_countdowns, which needs to go from a color to "is THIS
+        color's occupant currently expired" -- the reverse direction of
+        the more common username -> color lookups elsewhere."""
+        for username, seat_color in game.seats.items():
+            if seat_color == color:
+                return username
+        return None
 
     def _winner_of(self, session):
         """The color whose king is still on the board, or None if neither
