@@ -87,6 +87,30 @@ def test_a_move_missing_dst_raises_bad_payload():
     assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
 
 
+def test_a_game_over_missing_winner_username_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.GAME_OVER, "winner": "w"}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+# --- game_over's winner_username (winner-by-username, not by color) --------
+
+def test_game_over_defaults_winner_username_to_none():
+    assert protocol.game_over("w")["winner_username"] is None
+
+
+def test_game_over_carries_the_winner_username_through_a_round_trip():
+    message = protocol.game_over("w", winner_username="alice")
+    round_tripped = protocol.loads(protocol.dumps(message))
+    assert round_tripped["winner_username"] == "alice"
+
+
+def test_game_over_with_no_winner_has_no_winner_username_either():
+    message = protocol.game_over(None)
+    assert message["winner"] is None
+    assert message["winner_username"] is None
+
+
 def test_a_move_whose_src_is_not_a_two_element_int_list_raises_bad_payload():
     with pytest.raises(ProtocolError) as excinfo:
         protocol.loads(json.dumps({"type": protocol.MOVE, "src": [0], "dst": [1, 1]}))

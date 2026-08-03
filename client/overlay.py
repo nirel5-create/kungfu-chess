@@ -69,6 +69,28 @@ class BannerOverlay:
         as on_game_start."""
         self._pending = "GAME OVER"
 
+    def show_result(self, winner, winner_username):
+        """Queue the end banner naming the actual outcome: "<username>
+        wins" for a decisive game, or "Game ended with no result" when
+        `winner` is None -- both players disconnected (slide 5.2), or any
+        other reason no result could be determined. Never "draw":
+        Server_Design.md's rule is that an inconclusive game is not scored
+        as one, and the banner should not suggest otherwise either.
+
+        Separate from on_game_end (kept exactly as it was, for whatever
+        wants the plain, uninformative trigger) because this needs the
+        actual outcome, which only the server knows and reports by
+        `winner_username`, not by color -- a color means nothing to a
+        player who does not track them, but everyone knows their own
+        name. See client.py's run() for when this is called instead of
+        on_game_end: once game_over is true AND the server's own
+        `game_over` message has actually arrived (_ServerLink.result()),
+        rather than guessing from the snapshot alone."""
+        if winner is None:
+            self._pending = "Game ended with no result"
+        else:
+            self._pending = f"{winner_username} wins"
+
     def showing(self, elapsed_ms):
         """-> the text that should be visible at `elapsed_ms`, or None.
         Pure: promotes a queued banner to shown (timestamping it against
@@ -96,26 +118,64 @@ class BannerOverlay:
         _draw_with_backing(frame, text, x, y, color=(255, 255, 255, 255))
 
 
-class CountdownOverlay:  # pylint: disable=too-few-public-methods
-    """Draws the disconnect countdown (slide 5.2) over the board -- not the
-    side panel, per Step 9: the opponent has vanished and the game is about
-    to be decided without a move, so this must be impossible to miss.
+_RECONNECTED_TEXT = "Opponent reconnected"
+_RECONNECTED_MS = 2000  # how long the reconnect confirmation stays up
+_COUNTDOWN_COLOR = (60, 60, 255, 255)   # red-ish: something is wrong
+_RECONNECTED_COLOR = (80, 200, 80, 255)  # green-ish: good news, unlike the countdown
+
+
+class CountdownOverlay:
+    """Draws connection-status text over the board -- not the side panel,
+    per Step 9: the opponent may or may not still be there, so neither
+    message this class shows should be easy to miss.
 
     Reuses BannerOverlay's drawing pattern (the shared _draw_with_backing
-    above) but not its state machine: a countdown is a live, externally
-    updated number -- driven by _ServerLink.countdown() in client.py's run()
-    -- not a one-shot announcement with a fixed duration, so there is
-    nothing here to time out on its own."""
+    above) but not its bus-driven state machine. The countdown itself
+    (draw's `seconds`) is a live, externally updated number -- driven by
+    _ServerLink.countdown() in client.py's run() -- not a one-shot
+    announcement with a fixed duration. The reconnect confirmation IS
+    timed, but on a plain elapsed_ms deadline set by show_reconnected(),
+    not a bus event: run() is what notices a countdown has gone quiet
+    while the game is still in progress (the one case that actually means
+    the opponent came back -- see show_reconnected's own docstring), and
+    this class only ever draws what it is told."""
 
-    def draw(self, frame, seconds):
-        """Draw `seconds` centered near the top of the board. A no-op --
-        frame untouched -- when `seconds` is None, which is how the caller
-        says there is currently nothing to show (nobody away, or the away
-        player just reconnected -- see _ServerLink.countdown's docstring)."""
-        if seconds is None:
+    def __init__(self):
+        self._reconnected_shown_at_ms = None  # None until show_reconnected() -- see its docstring
+
+    def show_reconnected(self, elapsed_ms):
+        """Queue the "Opponent reconnected" confirmation, starting now (in
+        the same wall-clock stopwatch draw() is timed against). Call this
+        only when a countdown that WAS running has gone quiet while the
+        game is still in progress -- the one case that actually means the
+        opponent came back, as opposed to the countdown expiring and
+        ending the game instead (auto-resign, slide 5.2), which reports
+        its own outcome through BannerOverlay.show_result instead. Telling
+        the two apart is run()'s job, not this class's: it is the one
+        place that already sees both the countdown and the snapshot's own
+        game_over flag every frame."""
+        self._reconnected_shown_at_ms = elapsed_ms
+
+    def draw(self, frame, seconds, elapsed_ms):
+        """Draw the live countdown if one is running (`seconds` is not
+        None). Otherwise, draw "Opponent reconnected" if show_reconnected()
+        was called within the last _RECONNECTED_MS of `elapsed_ms`. A
+        no-op -- frame untouched -- when neither applies.
+
+        A fresh disconnect always takes priority over a still-showing
+        reconnect confirmation: `seconds` reflects what is actually
+        happening right now, which matters more than a message about what
+        just finished happening."""
+        if seconds is not None:
+            self._draw_centered(frame, f"Opponent disconnected: {seconds}s", _COUNTDOWN_COLOR)
             return
-        text = f"Opponent disconnected: {seconds}s"
+        if (self._reconnected_shown_at_ms is not None
+                and elapsed_ms - self._reconnected_shown_at_ms < _RECONNECTED_MS):
+            self._draw_centered(frame, _RECONNECTED_TEXT, _RECONNECTED_COLOR)
+
+    @staticmethod
+    def _draw_centered(frame, text, color):
         width = frame.img.shape[1]
         (text_w, _text_h), _baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
         x, y = (width - text_w) // 2, 60
-        _draw_with_backing(frame, text, x, y, color=(60, 60, 255, 255))
+        _draw_with_backing(frame, text, x, y, color=color)

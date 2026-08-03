@@ -32,13 +32,19 @@ persistence: this is presentation only (slide 3); the account system is a
 later step. Which color this client is assigned is decided by the server
 from connection order, not from anything this file sends or asserts.
 
-Score, move log, sound and the start/end banner are wired through one
+Score, move log, sound and the start banner are wired through one
 common.bus.Bus (Step 6): build_client subscribes GameObserver (frozen,
 untouched -- wrapped in a lambda, never edited), client.events.GameEventSource,
 client.sound.SoundPlayer and client.overlay.BannerOverlay to it, and the draw
 loop below only ever calls bus.publish(topics.SNAPSHOT, snapshot) -- it never
 names who reacts. Adding a future subscriber never touches this loop; that is
 the whole point of routing these four through a bus instead of direct calls.
+
+The end banner's TEXT is the one exception: it names the winner by username,
+which GameEventSource's snapshot-only view can never know (see its own module
+docstring), so run() calls banner.show_result directly once the server's own
+`game_over` message (_ServerLink.result()) has actually named an outcome,
+rather than through the bus.
 
 Run with:  python client.py
 """
@@ -128,6 +134,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._error = None  # None unless the server sent an `error` message
         self._countdown_seconds = None  # None unless a countdown is live -- see countdown()
         self._countdown_updated_at = None  # time.time() of the last countdown message
+        self._result = None  # (winner, winner_username) once `game_over` arrives -- see result()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -193,6 +200,21 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                 return None
             return self._countdown_seconds
 
+    def result(self):
+        """-> (winner, winner_username) from the server's `game_over`
+        message, or None before one has arrived. `winner` is "w"/"b"/None;
+        `winner_username` is the display name for a decisive win, or None
+        when `winner` is None -- no result, not a draw (Server_Design.md).
+
+        The server sends `game_over` once, right after the last `state`
+        for that game (see server.py's _tick_loop), so a caller polling
+        this every frame -- see run() -- will see it become non-None
+        within a frame or two of `snapshot().game_over` turning True, not
+        necessarily the exact same frame; run() waits for both rather than
+        assuming they always land together."""
+        with self._lock:
+            return self._result
+
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
         thread's loop and returns immediately; silently drops the message if
@@ -255,6 +277,11 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                         self._countdown_seconds = message["seconds"]
                         self._countdown_updated_at = time.time()
                     _log.info("countdown: %ds", message["seconds"])
+                elif message["type"] == protocol.GAME_OVER:
+                    with self._lock:
+                        self._result = (message["winner"], message["winner_username"])
+                    _log.info("game over: winner=%s (%s)",
+                              message["winner"], message["winner_username"])
             _log.info("disconnected from %s", self._uri)
 
 
@@ -487,7 +514,15 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     bus.subscribe(topics.SNAPSHOT, event_source.on_snapshot)
     bus.subscribe(topics.SOUND, sound_player.on_sound)
     bus.subscribe(topics.GAME_START, banner.on_game_start)
-    bus.subscribe(topics.GAME_END, banner.on_game_end)
+    # Deliberately NOT bus.subscribe(topics.GAME_END, banner.on_game_end):
+    # GameEventSource's own GAME_END payload is always {} (see its module
+    # docstring -- it only ever sees snapshots, never who won), which is
+    # all on_game_end can show ("GAME OVER", left as-is for whatever else
+    # might still want that plain trigger). The server's own `game_over`
+    # message names the actual winner by username, so run()'s loop calls
+    # banner.show_result directly once that message has actually arrived
+    # -- see run() for why it waits rather than reading link.result() from
+    # inside this bus callback.
 
     return controller, renderer, link, bus, clock, banner, countdown_overlay, panel, sound_player
 
@@ -558,12 +593,17 @@ def _room_message_from_dialog(action, room_name):  # pragma: no cover
     return protocol.play()
 
 
-def run(username, password):  # pragma: no cover, pylint: disable=too-many-locals
+def run(username, password):  # pragma: no cover, pylint: disable=too-many-locals, too-many-statements
     # Local count grew past the threshold with the Room dialog's two
     # extra names (dialog_action, room_name) on top of what build_client
     # already returns -- one frame loop genuinely touches this many
     # independent parts; splitting it up would just move names around,
-    # the same reasoning build_client's own disable above gives.
+    # the same reasoning build_client's own disable above gives. Statement
+    # count grew the same way with the winner-banner and reconnect-message
+    # triggers below: both are a few linear lines read once per frame,
+    # not separable logic, so splitting them into their own functions
+    # would just add call overhead and two more names to thread the same
+    # loop-local state (elapsed_ms, snapshot, link) through.
     """Wait for the server to verify login, THEN show the Room dialog
     (slide 6) and send its outcome, wait again for the server to seat
     this connection or refuse it, then open the window and run the frame
@@ -614,6 +654,13 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
         print(f"Connection refused by server: {link.error()}")
         return
     start_time = time.time()
+    game_over_reported = False  # -> whether banner.show_result has fired
+    #   for the current game yet -- see the draw loop for why this is
+    #   checked every frame rather than fired once on a bus event.
+    previous_countdown_seconds = None  # -> link.countdown() as of the last
+    #   frame, for detecting the one transition (live -> cleared, game
+    #   still in progress) that actually means the opponent reconnected --
+    #   see the draw loop.
 
     def on_mouse(event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -638,14 +685,43 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
             elapsed_ms = int((time.time() - start_time) * 1000)
             clock["elapsed_ms"] = elapsed_ms
             bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts: score,
-            #   move log, sound and the banner all subscribe in build_client.
-            #   Adding a future subscriber never touches this loop -- that is
-            #   the whole justification for routing these through a bus.
+            #   move log, sound and the start banner all subscribe in
+            #   build_client. Adding a future subscriber never touches this
+            #   loop -- that is the whole justification for routing these
+            #   through a bus. (The end banner's text is decided below
+            #   instead -- see build_client's own comment on why.)
+            if snapshot.game_over:
+                if not game_over_reported:
+                    result = link.result()
+                    # None here means the server's `game_over` message has
+                    # not arrived yet -- see result()'s own docstring on why
+                    # that can lag `snapshot.game_over` by a frame or two.
+                    # Simply trying again next frame, rather than falling
+                    # back to a winner-less banner now, is what makes this
+                    # race harmless instead of an occasional wrong display.
+                    if result is not None:
+                        banner.show_result(*result)
+                        game_over_reported = True
+            else:
+                game_over_reported = False
+            countdown_seconds = link.countdown()
+            if (previous_countdown_seconds is not None and countdown_seconds is None
+                    and not snapshot.game_over):
+                # The only way a live countdown goes quiet without a
+                # `game_over` message following it: the opponent's away_ms
+                # was cleared by GameRegistry.join, i.e. they reconnected.
+                # If the game ended instead (auto-resign, slide 5.2),
+                # snapshot.game_over is already true by the time this ever
+                # goes quiet -- countdown()'s own staleness window is wider
+                # than one tick, so the game-over branch above always wins
+                # that race, never this one.
+                countdown_overlay.show_reconnected(elapsed_ms)
+            previous_countdown_seconds = countdown_seconds
             frame = renderer.render(snapshot, elapsed_ms)
             banner.draw(frame, elapsed_ms)  # centered on the true board size,
             #   before the canvas is widened below -- see _widen_canvas.
-            countdown_overlay.draw(frame, link.countdown())  # same reason:
-            #   drawn over the true board, not the widened panel strip.
+            countdown_overlay.draw(frame, countdown_seconds, elapsed_ms)  # same
+            #   reason: drawn over the true board, not the widened panel strip.
             frame = _widen_canvas(frame, _PANEL_WIDTH)
             panel.draw(frame)
             panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20

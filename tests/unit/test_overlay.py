@@ -76,12 +76,34 @@ def test_draw_paints_a_dark_backing_rectangle_behind_the_text():
     assert center[3] == 255
 
 
+# --- BannerOverlay.show_result (winner by username, not color) --------------
+
+def test_show_result_names_the_winner_by_username():
+    overlay = BannerOverlay()
+    overlay.show_result("w", "alice")
+    assert overlay.showing(0) == "alice wins"
+
+
+def test_show_result_with_no_winner_says_no_result_not_a_draw():
+    overlay = BannerOverlay()
+    overlay.show_result(None, None)
+    assert overlay.showing(0) == "Game ended with no result"
+
+
+def test_show_result_expires_after_duration_ms_like_any_other_banner():
+    overlay = BannerOverlay(duration_ms=2000)
+    overlay.show_result("b", "bob")
+    assert overlay.showing(0) == "bob wins"
+    assert overlay.showing(1999) == "bob wins"
+    assert overlay.showing(2000) is None
+
+
 # --- CountdownOverlay (Step 9, slide 5.2) ------------------------------------
 
 def test_countdown_overlay_draws_nothing_when_seconds_is_none():
     overlay = CountdownOverlay()
     frame = _FakeFrame()
-    overlay.draw(frame, None)
+    overlay.draw(frame, None, 0)
     assert frame.calls == []
     assert not frame.img.any()
 
@@ -89,7 +111,7 @@ def test_countdown_overlay_draws_nothing_when_seconds_is_none():
 def test_countdown_overlay_calls_put_text_when_seconds_is_given():
     overlay = CountdownOverlay()
     frame = _FakeFrame(width=900, height=700)  # board-sized: see _FakeFrame
-    overlay.draw(frame, 5)
+    overlay.draw(frame, 5, 0)
     assert len(frame.calls) == 1
 
 
@@ -99,8 +121,43 @@ def test_countdown_overlay_paints_a_backing_rectangle_behind_the_text():
     # rectangle is drawn straight onto frame.img, not through put_text.
     overlay = CountdownOverlay()
     frame = _FakeFrame(width=900, height=700)
-    overlay.draw(frame, 5)
+    overlay.draw(frame, 5, 0)
     center = frame.img[55, 450]  # near the vertical/horizontal center of
     #   the text's backing box -- see draw()'s x, y computation.
     assert tuple(center[:3]) == (0, 0, 0)
     assert center[3] == 255
+
+
+# --- CountdownOverlay.show_reconnected ---------------------------------------
+
+def test_reconnected_draws_nothing_if_never_shown():
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 0)
+    assert frame.calls == []
+
+
+def test_show_reconnected_then_draw_with_no_seconds_shows_the_confirmation():
+    overlay = CountdownOverlay()
+    overlay.show_reconnected(1000)
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 1500)
+    assert len(frame.calls) == 1
+
+
+def test_reconnected_confirmation_expires_after_its_own_duration():
+    overlay = CountdownOverlay()
+    overlay.show_reconnected(1000)
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 1000 + 2000)
+    assert frame.calls == []
+
+
+def test_a_fresh_countdown_takes_priority_over_a_still_showing_reconnected_message():
+    overlay = CountdownOverlay()
+    overlay.show_reconnected(1000)
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, 20, 1100)  # opponent disconnected again, quickly
+    assert len(frame.calls) == 1
+    (args, _kwargs) = frame.calls[0]
+    assert "disconnected" in args[0]

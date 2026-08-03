@@ -392,12 +392,28 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn):  
             _log.info("countdown started for %s in game %s", username, game_id)
 
 
-async def _tick_loop(registry, clients):  # pragma: no cover, pylint: disable=too-many-locals
+def _winner_username(seats, winner):
+    """-> the username sitting in the `winner` seat, or None if there is no
+    winner (a game with no result reports no name, not a color -- see
+    protocol.game_over's own docstring) or, defensively, if the winning
+    color was somehow never seated -- should not happen, since `winner` can
+    only ever be a color GameRegistry itself found seated."""
+    if winner is None:
+        return None
+    return next((user for user, color in seats.items() if color == winner), None)
+
+
+async def _tick_loop(registry, clients, ended_games):  # pragma: no cover, pylint: disable=too-many-locals, too-many-branches
     # A tick genuinely touches this many independent pieces (the summary
-    # counters, the per-game client list reused for two different
+    # counters, the per-game client list reused for three different
     # broadcasts, the countdown bookkeeping) -- splitting it up would just
     # move names around, the same reasoning other disables in this file
-    # give.
+    # give. Three send-if-appropriate blocks (state, game_over, countdown)
+    # inside the same per-game loop is what pushes the branch count over
+    # pylint's default threshold -- each block is a few lines and reads
+    # linearly, so splitting them into separate functions would trade one
+    # readable loop for three that all need the same game_clients list
+    # threaded through them.
     """Advance every game by a fixed step on a fixed interval, then push
     each game's own snapshot only to the clients sitting in that game.
     Today every client shares one game (see _find_or_create_game); once
@@ -416,6 +432,19 @@ async def _tick_loop(registry, clients):  # pragma: no cover, pylint: disable=to
     is what makes a countdown that stops (the player reconnected, or the
     game ended) simply stop appearing in it -- nothing to explicitly
     clean up.
+
+    Also broadcasts the outcome once a game ends: `ended_games` is a plain
+    list a GAME_END bus subscriber appends its payload to (see _main) --
+    GameRegistry.advance publishes GAME_END synchronously, from inside the
+    registry.advance(...) call below, so by the time this function reaches
+    the per-game loop every game that just ended this tick is already in
+    it. A game that ended stays in registry.game_ids() for its whole
+    GAME_END_LINGER_MS afterward (common/registry.py), which is many ticks
+    at _TICK_MS=30 -- comfortably longer than the one tick `ended_games`
+    is ever allowed to hold an entry for (drained, in full, every tick
+    below), so an ended game's id is always still there to match against.
+    Sent once per game, to whichever clients are connected to it at that
+    moment -- the same clients its final `state` broadcast just went to.
 
     Also logs a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
     connected clients) -- never the per-tick broadcast itself; see
@@ -444,6 +473,8 @@ async def _tick_loop(registry, clients):  # pragma: no cover, pylint: disable=to
                        tick_count, len(registry.game_ids()), len(clients))
         dead = set()
         current_countdown_seconds = {}
+        ended_by_game_id = {payload["game_id"]: payload for payload in ended_games}
+        ended_games.clear()
         for game_id in registry.game_ids():
             session = registry.session(game_id)
             if session is None:
@@ -456,6 +487,16 @@ async def _tick_loop(registry, clients):  # pragma: no cover, pylint: disable=to
                     await websocket.send(message)
                 except websockets.ConnectionClosed:
                     dead.add(websocket)
+            ended_payload = ended_by_game_id.get(game_id)
+            if ended_payload is not None:
+                winner = ended_payload["winner"]
+                winner_username = _winner_username(ended_payload["seats"], winner)
+                game_over_message = protocol.dumps(protocol.game_over(winner, winner_username))
+                for websocket in game_clients:
+                    try:
+                        await websocket.send(game_over_message)
+                    except websockets.ConnectionClosed:
+                        dead.add(websocket)
             for username, ms_left in registry.countdown_ms(game_id).items():
                 seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
                 key = (game_id, username)
@@ -554,16 +595,23 @@ async def _main():  # pragma: no cover
     # Nothing else subscribes to GAME_START yet -- publishing it
     # unconditionally from here on is what lets ELO (a later step) attach
     # as a bus subscriber, with no change to GameRegistry or this file.
-    # GAME_END gets two subscribers here: one purely to log the winner
+    # GAME_END gets three subscribers here: one purely to log the winner
     # (this is the only place that knows how to turn a game_id into a log
     # line, so it belongs here rather than in GameRegistry, which does not
-    # log), and _update_ratings_on_game_end (Step 8) -- the entire ELO
-    # half of slide 4 is this one extra subscribe() call, exactly as
-    # GameRegistry's own module docstring says the bus was built to allow.
+    # log), _update_ratings_on_game_end (Step 8) -- the entire ELO half of
+    # slide 4 is this one extra subscribe() call, exactly as GameRegistry's
+    # own module docstring says the bus was built to allow -- and
+    # ended_games.append, which hands each payload to _tick_loop so it can
+    # broadcast the outcome to that game's clients (Bus.publish is
+    # synchronous, so a subscriber cannot itself await a websocket.send;
+    # see _tick_loop's own docstring for why this hand-off is a plain list
+    # rather than an async mechanism).
     bus.subscribe(topics.GAME_END, lambda payload: _log.info(
         "game %s ended, winner=%s", payload["game_id"], payload["winner"]))
     bus.subscribe(topics.GAME_END,
                   lambda payload: _update_ratings_on_game_end(db_conn, payload))
+    ended_games = []  # GAME_END payloads awaiting _tick_loop's next broadcast
+    bus.subscribe(topics.GAME_END, ended_games.append)
     # king_type is passed explicitly rather than left at GameRegistry's own
     # default: both currently say "K", but that is one fact declared twice.
     # If _CONFIG's king token ever changed, an implicit default here would
@@ -579,7 +627,7 @@ async def _main():  # pragma: no cover
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)
-        await _tick_loop(registry, clients)
+        await _tick_loop(registry, clients, ended_games)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -58,7 +58,7 @@ _REQUIRED_FIELDS = {
     STATE: ("snapshot",),
     ASSIGNED: ("color",),
     COUNTDOWN: ("seconds",),
-    GAME_OVER: ("winner",),
+    GAME_OVER: ("winner", "winner_username"),
     MATCHMAKING: ("status",),
     ROOM: ("id",),
     ERROR: ("reason",),
@@ -217,13 +217,23 @@ def countdown(seconds):
     return {"type": COUNTDOWN, "seconds": seconds}
 
 
-def game_over(winner, rating=None):
-    """`winner` is `"w"`, `"b"`, or `None` for a draw. `rating`, when present, is
-    this client's own result: `{"you": <new rating>, "delta": <signed change>}`,
-    where `delta` is the ELO adjustment the server has ALREADY applied and persisted
-    (so `you == old + delta`). It is `None` when there is no rating to report. Once
-    sent, the game is finished; the receiver should stop accepting further moves."""
-    return {"type": GAME_OVER, "winner": winner, "rating": rating}
+def game_over(winner, winner_username=None, rating=None):
+    """`winner` is `"w"`, `"b"`, or `None` -- there is no draw: an inconclusive
+    game (e.g. both players disconnected, slide 5.2) reports `None`, per
+    Server_Design.md's rule that it is not scored as one either.
+
+    `winner_username` is the display name for a decisive win -- a color means
+    nothing to a player who does not track them, so the server resolves it
+    from the game's seats before sending. `None` whenever `winner` is `None`,
+    or if the winning seat's username is for some reason not known.
+
+    `rating`, when present, is this client's own result: `{"you": <new rating>,
+    "delta": <signed change>}`, where `delta` is the ELO adjustment the server
+    has ALREADY applied and persisted (so `you == old + delta`). It is `None`
+    when there is no rating to report. Once sent, the game is finished; the
+    receiver should stop accepting further moves."""
+    return {"type": GAME_OVER, "winner": winner,
+            "winner_username": winner_username, "rating": rating}
 
 
 def matchmaking(status):
