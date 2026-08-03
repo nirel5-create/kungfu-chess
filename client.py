@@ -61,7 +61,7 @@ import websockets
 
 from client.events import GameEventSource
 from client.overlay import BannerOverlay, CountdownOverlay
-from client.roomdialog import CREATE, JOIN, ask_room
+from client.roomdialog import CREATE, JOIN, PLAY, ask_room, show_no_opponent_found
 from client.sound import SoundPlayer
 from common import net, protocol, topics
 from common.bus import Bus
@@ -135,6 +135,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._countdown_seconds = None  # None unless a countdown is live -- see countdown()
         self._countdown_updated_at = None  # time.time() of the last countdown message
         self._result = None  # (winner, winner_username) once `game_over` arrives -- see result()
+        self._matchmaking_status = None  # "searching"/"found"/"timeout" -- see matchmaking_status()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -215,6 +216,16 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         with self._lock:
             return self._result
 
+    def matchmaking_status(self):
+        """-> the latest status from a `matchmaking` message ("searching",
+        "found", or "timeout" -- see protocol.matchmaking's own docstring),
+        or None before any has arrived. Only ever set for a connection
+        that sent protocol.play() (see run()); a Room/default-game
+        connection never receives this message type at all, so this stays
+        None for the whole session in that case."""
+        with self._lock:
+            return self._matchmaking_status
+
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
         thread's loop and returns immediately; silently drops the message if
@@ -282,6 +293,10 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                         self._result = (message["winner"], message["winner_username"])
                     _log.info("game over: winner=%s (%s)",
                               message["winner"], message["winner_username"])
+                elif message["type"] == protocol.MATCHMAKING:
+                    with self._lock:
+                        self._matchmaking_status = message["status"]
+                    _log.info("matchmaking: %s", message["status"])
             _log.info("disconnected from %s", self._uri)
 
 
@@ -580,6 +595,33 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
         time.sleep(poll_interval)
 
 
+def _wait_for_matchmaking_outcome(link, poll_interval=0.02):  # pragma: no cover
+    """Block until Play's search (slide 5.1) resolves: matchmaking_status()
+    becomes "found" or "timeout", or a refusal (error()) arrives. Prints
+    once, the moment "searching" is first seen, so the player is not left
+    staring at nothing for up to the minute the search is allowed to run
+    (see protocol.matchmaking's own docstring for the three states) --
+    printed here, not in run(), so the "only once" bookkeeping stays local
+    to the one place that needs it.
+
+    Only called when run() sent protocol.play() -- see its own docstring
+    for why a Room/default-game connection never needs this at all.
+
+    On "found", the caller (run()) falls through into the ordinary
+    _wait_for_assignment_or_error above: the server always sends `assigned`
+    right after matchmaking("found") -- protocol.matchmaking's own
+    docstring promises it -- so nothing new is needed to pick that up."""
+    printed_searching = False
+    while True:
+        status = link.matchmaking_status()
+        if not printed_searching and status == "searching":
+            print("Searching for an opponent (up to 1 minute)...")
+            printed_searching = True
+        if status in ("found", "timeout") or link.error() is not None:
+            return
+        time.sleep(poll_interval)
+
+
 def _room_message_from_dialog(action, room_name):  # pragma: no cover
     """-> the protocol message to send for the Room dialog's outcome:
     room_create/room_join for Create/Join, or protocol.play() -- slide
@@ -593,16 +635,19 @@ def _room_message_from_dialog(action, room_name):  # pragma: no cover
     return protocol.play()
 
 
-def run(username, password):  # pragma: no cover, pylint: disable=too-many-locals, too-many-statements
+def run(username, password):
+    # pragma: no cover
+    # pylint: disable=too-many-locals, too-many-statements, too-many-branches
     # Local count grew past the threshold with the Room dialog's two
     # extra names (dialog_action, room_name) on top of what build_client
     # already returns -- one frame loop genuinely touches this many
     # independent parts; splitting it up would just move names around,
     # the same reasoning build_client's own disable above gives. Statement
-    # count grew the same way with the winner-banner and reconnect-message
-    # triggers below: both are a few linear lines read once per frame,
+    # and branch counts grew the same way with the winner-banner and
+    # reconnect-message triggers, and Play's own three-way outcome, below:
+    # each is a few linear lines read once per frame or once per run,
     # not separable logic, so splitting them into their own functions
-    # would just add call overhead and two more names to thread the same
+    # would just add call overhead and more names to thread the same
     # loop-local state (elapsed_ms, snapshot, link) through.
     """Wait for the server to verify login, THEN show the Room dialog
     (slide 6) and send its outcome, wait again for the server to seat
@@ -632,7 +677,18 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
     or "no_such_room" on the server) is reported on the terminal and ends
     the program before any window opens -- there would be nothing for
     that window to do, since the server never seats it, so opening one
-    would just show an empty board no click can ever affect."""
+    would just show an empty board no click can ever affect.
+
+    Play (slide 5.1) is a fourth outcome of the dialog, not a refusal: it
+    can take up to a minute (common.matchmaker.SEARCH_TIMEOUT_MS) before
+    the server knows whether there is an opponent at all, so this waits on
+    _wait_for_matchmaking_outcome instead of the ordinary
+    _wait_for_assignment_or_error until the search itself resolves --
+    "found" falls through into that same ordinary wait for `assigned`;
+    "timeout" shows a message box (client/roomdialog.py's
+    show_no_opponent_found, slide 5's own requirement) and exits, the same
+    way any other refusal does, just via a window instead of the
+    terminal."""
     # cv2 is a compiled C extension, so pylint cannot introspect its
     # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
     # all exist and work at runtime (app.py, frozen and untouched, uses the
@@ -649,6 +705,18 @@ def run(username, password):  # pragma: no cover, pylint: disable=too-many-local
         return
     dialog_action, room_name = ask_room()
     link.send(_room_message_from_dialog(dialog_action, room_name))
+    if dialog_action == PLAY:
+        _wait_for_matchmaking_outcome(link)
+        if link.error() is not None:
+            print(f"Connection refused by server: {link.error()}")
+            return
+        if link.matchmaking_status() == "timeout":
+            show_no_opponent_found()
+            return
+        # "found": the server already sent `assigned` right after
+        # matchmaking("found") -- see _wait_for_matchmaking_outcome's own
+        # docstring -- so falling through into the ordinary wait below
+        # picks it up with no special case of its own.
     _wait_for_assignment_or_error(link)
     if link.error() is not None:
         print(f"Connection refused by server: {link.error()}")

@@ -30,6 +30,7 @@ client.py's job; this only reports the player's choice.
 """
 
 import tkinter as tk
+from tkinter import messagebox
 
 CREATE = "create"
 JOIN = "join"
@@ -88,3 +89,18 @@ def ask_room(title="Room"):  # pragma: no cover -- opens a real window
 
     root.mainloop()
     return tuple(result)
+
+
+def show_no_opponent_found():  # pragma: no cover -- opens a real window
+    """Show a message box saying Play's search found no opponent (slide 5:
+    "pops up a message that can't find") -- a real OS dialog, the same
+    tkinter approach ask_room already uses, not console text and not
+    something drawn in the OpenCV window (there is no window at this
+    point: matchmaking runs entirely before one ever opens -- see
+    client.py's run()). tkinter.messagebox rather than hand-built widgets
+    like ask_room's, since this needs nothing more than an acknowledgement
+    -- there is no choice for the player to make here."""
+    root = tk.Tk()
+    root.withdraw()  # nothing else needs this window; only the messagebox does
+    messagebox.showinfo("Play", "No opponent found. Try again later.")
+    root.destroy()

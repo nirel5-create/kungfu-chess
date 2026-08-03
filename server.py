@@ -23,10 +23,18 @@ Step 5 fixes a real bug: this file used to build ONE GameSession at startup
 and keep it forever, so once its king fell every later arrival got a
 permanently-finished game and closed immediately. Now the server holds MANY
 games via GameRegistry, and _find_or_create_game (below) is a small, clearly
-separate policy function that decides which game a new connection joins --
-today, everyone shares one open game, creating a fresh one when none is
-open. Play (slide 5) and Room (slide 6) will later replace only that one
-function; GameRegistry itself needs no change for either.
+separate policy function that decides which game a new connection joins when
+it asks for neither a room nor Play -- everyone left over shares one open
+game, creating a fresh one when none is open.
+
+Room (slide 6) replaced only that one function's default: room_create/
+room_join pick game_id via _create_room/_join_room instead. Play (slide 5.1,
+Step 10) is a third, separate path, not a fourth policy for
+_find_or_create_game to choose between: a Play seeker has no game_id at all
+until common.matchmaker.MatchMaker pairs it with someone, which can take up
+to a minute, so it waits (_play_matchmaking) instead of being handed a game
+immediately -- see _tick_loop for where the actual pairing happens.
+GameRegistry itself needed no change for any of the three.
 
 Colors are assigned by GameRegistry.join, by connection order within a game
 (Step 4): the first to join a game is seated "w", the second "b", and any
@@ -46,6 +54,14 @@ depend on the database: a failed connection, at startup or later, is
 logged and the server (and every login) keeps working regardless -- see
 _connect_db, _authenticate, and _update_ratings_on_game_end.
 
+Step 10 (slide 5.1) adds Play: common.matchmaker.MatchMaker is a pure queue
+(no sockets, no database, no wall clock -- see its own module docstring)
+that this file feeds ratings into and reads pairs/timeouts out of, once per
+tick, the same explicit-time discipline GameRegistry.advance already keeps.
+This file is what turns a pairing into an actual game (GameRegistry.create
+plus two joins) and a timeout into a message, and what looks up a rating in
+the first place (common.db.get_rating) -- none of that is MatchMaker's job.
+
 Run with:  python server.py
 """
 
@@ -57,6 +73,7 @@ import websockets
 from common import db, elo, net, protocol, topics
 from common.bus import Bus
 from common.logsetup import add_file_logging
+from common.matchmaker import MatchMaker
 from common.registry import AlreadyConnectedError, GameRegistry
 from engine.game import GameEngine
 from model.board import Board
@@ -185,21 +202,47 @@ def _authenticate(db_conn, username, password):  # pragma: no cover
         return True
 
 
+def _rating_for_matchmaking(db_conn, username):  # pragma: no cover
+    """-> `username`'s rating, for Play's pairing window (slide 5.1).
+    Falls back to db.DEFAULT_RATING -- logged, never raised -- when
+    `db_conn` is None (Postgres unreachable at startup), `username` has no
+    stored rating (should not normally happen: login already creates or
+    looks up the account first, see _authenticate), or the lookup itself
+    raises (Postgres unreachable mid-session). Play must not stop working
+    just because a rating lookup did, the same promise every other
+    database-touching path in this file keeps (see _authenticate,
+    _update_ratings_on_game_end)."""
+    if db_conn is not None:
+        try:
+            rating = db.get_rating(db_conn, username)
+        except Exception as exc:  # pylint: disable=broad-except
+            _log.warning("rating lookup failed for %s (%s); using default %d for matchmaking",
+                         username, exc, db.DEFAULT_RATING)
+            return db.DEFAULT_RATING
+        if rating is not None:
+            return rating
+        _log.warning("no stored rating for %s; using default %d for matchmaking",
+                     username, db.DEFAULT_RATING)
+    return db.DEFAULT_RATING
+
+
 async def _read_room_choice(websocket):  # pragma: no cover
-    """-> (protocol.ROOM_CREATE, name) or (protocol.ROOM_JOIN, room_id) if
-    the client's optional second message (right after login) is one of
-    those two types within _ROOM_MESSAGE_TIMEOUT_S, else None. None covers
-    three cases identically: an explicit protocol.play() (client/
-    roomdialog.py's Play button), a client that never implements the
-    dialog and sends nothing at all, and a client that sent something
-    this function does not recognize -- all fall back to
-    _find_or_create_game exactly as before Room existed, per
-    STEP7_ROOMS.md. A malformed frame is treated the same way rather than
-    as an error: at this point in the handshake the client has nothing
-    else legitimate to send beyond these three, so this is defence in
-    depth, the same spirit as GameSession.submit silently ignoring an
-    unrecognized
-    message type."""
+    """-> (protocol.ROOM_CREATE, name), (protocol.ROOM_JOIN, room_id), or
+    (protocol.PLAY, None) if the client's optional second message (right
+    after login) is one of those three types within
+    _ROOM_MESSAGE_TIMEOUT_S, else None. None covers two cases identically:
+    a client that never implements the dialog and sends nothing at all,
+    and a client that sent something this function does not recognize --
+    both fall back to _find_or_create_game exactly as before Room existed,
+    per STEP7_ROOMS.md. A malformed frame is treated the same way rather
+    than as an error: at this point in the handshake the client has
+    nothing else legitimate to send beyond these three, so this is
+    defence in depth, the same spirit as GameSession.submit silently
+    ignoring an unrecognized message type.
+
+    protocol.PLAY is its own outcome, not folded into None any more
+    (Step 10): _handle_client sends it to matchmaking instead of the
+    shared game -- see _play_matchmaking."""
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=_ROOM_MESSAGE_TIMEOUT_S)
     except (asyncio.TimeoutError, websockets.ConnectionClosed):
@@ -212,7 +255,105 @@ async def _read_room_choice(websocket):  # pragma: no cover
         return protocol.ROOM_CREATE, message["name"]
     if message["type"] == protocol.ROOM_JOIN:
         return protocol.ROOM_JOIN, message["id"]
+    if message["type"] == protocol.PLAY:
+        return protocol.PLAY, None
     return None
+
+
+async def _play_matchmaking(websocket, matchmaker, matchmaking,
+                             db_conn, username):  # pragma: no cover
+    """Enqueue `username` in `matchmaker` (Play, slide 5.1) and wait for
+    _tick_loop to either pair them or time them out.
+
+    -> (game_id, color) once _tick_loop has paired and joined this
+    connection -- it has also already sent matchmaking("found") and
+    assigned(color) by then, see _seat_matched_pair -- or None once timed
+    out (matchmaking("timeout") already sent, see
+    _report_matchmaking_timeout) or once this connection's own socket
+    closes while still queued.
+
+    `matchmaking` is a {username: (websocket, future, rating)} box
+    threaded from _main, the same shape `clients` has for joined
+    connections: _tick_loop needs a way to reach a WAITING connection's
+    own websocket (nothing else has it -- there is no game_id yet), and
+    needs `future` to hand the outcome back to this coroutine and
+    `rating` to log a pairing or timeout without asking the database
+    again.
+
+    A disconnect while queued is detected by racing `future` (resolved by
+    _tick_loop) against websocket.wait_closed(): otherwise nothing here is
+    reading the socket, so a closed connection would go unnoticed until it
+    eventually timed out on its own, up to a minute later -- during which
+    _tick_loop could still pair it with a live opponent, who would then be
+    waiting on someone already gone. That is the same class of bug Step 9
+    fixed for the abandoned default game, and exactly what this step's own
+    design doc warns against repeating."""
+    rating = _rating_for_matchmaking(db_conn, username)
+    future = asyncio.get_running_loop().create_future()
+    matchmaking[username] = (websocket, future, rating)
+    matchmaker.enqueue(username, rating)
+    _log.info("%s entered matchmaking at rating %d", username, rating)
+    try:
+        await websocket.send(protocol.dumps(protocol.matchmaking("searching")))
+        closed = asyncio.ensure_future(websocket.wait_closed())
+        try:
+            await asyncio.wait({future, closed}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            closed.cancel()
+        return future.result() if future.done() else None
+    except websockets.ConnectionClosed:
+        return None
+    finally:
+        matchmaker.cancel(username)
+        matchmaking.pop(username, None)
+
+
+async def _run_game_loop(websocket, registry, clients, game_id,
+                          color, username):  # pragma: no cover
+    # pylint: disable=too-many-arguments, too-many-positional-arguments
+    # Six independent pieces of context every caller already has in hand
+    # (the connection, the two collaborators from _main, and the seat this
+    # particular connection just got, however it got it) -- the same
+    # reasoning every other disable in this file gives.
+    """Register the connection in `clients`, send the current state, then
+    read and apply commands until it disconnects -- shared by every path
+    that ends with a seat in a game (the shared default game, a room, or a
+    Play match), so there is exactly one place that runs the command loop
+    and exactly one place that cleans up after it.
+
+    Does NOT send `assigned`: the shared/room paths send it themselves
+    right before calling this; a Play match already had it sent by
+    _tick_loop's _seat_matched_pair, before this connection's own
+    coroutine even learns which game or color it was matched to."""
+    clients[websocket] = (game_id, username)
+    _log.info("%s joined game %s as %s", username, game_id, color)
+    try:
+        await _send_state(websocket, registry.session(game_id))
+        async for raw in websocket:
+            try:
+                message = protocol.loads(raw)
+            except protocol.ProtocolError:
+                _log.exception("dropping malformed frame from %s in game %s",
+                                username, game_id)
+                continue
+            session = registry.session(game_id)
+            if session is None:
+                continue  # the game's linger period already elapsed
+            applied = session.submit(message, registry.color_of(game_id, username))
+            _log.info("%s %s from %s in game %s",
+                       "applied" if applied else "refused", message.get("type"),
+                       username, game_id)
+    finally:
+        clients.pop(websocket, None)
+        registry.leave(game_id, username)
+        _log.info("%s disconnected from game %s", username, game_id)
+        if color in ("w", "b"):
+            # A viewer leaving starts no countdown at all (see
+            # GameRegistry.leave), so nothing to log for that case --
+            # `color` is exactly the seat check that already distinguishes
+            # them, already known by the caller, no extra registry query
+            # needed.
+            _log.info("countdown started for %s in game %s", username, game_id)
 
 
 def _find_or_create_game(registry, default_game, username):
@@ -304,32 +445,37 @@ def _join_room(registry, room_id):
     return room_id
 
 
-async def _handle_client(websocket, registry, clients, default_game, db_conn):  # pragma: no cover, pylint: disable=too-many-locals
+async def _handle_client(websocket, registry, clients, default_game, db_conn,
+                          matchmaker, matchmaking):  # pragma: no cover
+                          # pylint: disable=too-many-locals, too-many-arguments, too-many-positional-arguments
     # One coroutine genuinely touches this many independent pieces of
-    # state (the connection, three collaborators threaded in from _main,
-    # and everything the login/room/command-loop steps compute along the
-    # way) -- splitting it up would just move names around, the same
+    # state (the connection, five collaborators threaded in from _main,
+    # and everything the login/room/play/command-loop steps compute along
+    # the way) -- splitting it up would just move names around, the same
     # reasoning client.py's build_client/run give their own disables.
     """One coroutine per connection: read the login username/password the
-    client sends first, join the policy-chosen game, send `assigned`
-    before the first `state` so the client knows its role from the
-    outset, register the connection, then apply every command it sends --
-    checked against its seat by GameSession.submit -- until it
-    disconnects, at which point it leaves the game (its seat stays held;
-    see GameRegistry.leave).
+    client sends first, get a seat one of three ways (see below), then
+    hand off to _run_game_loop, which registers the connection, sends the
+    current state, and applies every command it sends -- checked against
+    its seat by GameSession.submit -- until it disconnects.
 
     A wrong password (_authenticate) or a username already connected to
     the game it would join (GameRegistry.AlreadyConnectedError) both get
     refused outright -- an `error`, then close, before `clients` or
-    GameRegistry.join is ever touched, so neither reaches the command loop
-    or GameRegistry.leave below.
+    GameRegistry.join is ever touched, so neither reaches _run_game_loop.
 
-    Room (slide 6): the client's optional second message, right after
-    login, is room_create or room_join (see _read_room_choice); when
-    present it picks game_id via _create_room/_join_room instead of
-    _find_or_create_game, and a chosen/created room is confirmed with
-    `room` before anything else -- refused the same way if the name is
-    already taken (create) or does not exist (join)."""
+    Three ways to get a seat, from the client's optional second message
+    right after login (see _read_room_choice):
+    - Play (slide 5.1): matchmaking instead of a game -- _play_matchmaking
+      enqueues this connection and waits for _tick_loop to pair or time it
+      out; a timeout closes the connection with no game ever entered.
+    - Room (slide 6): room_create or room_join picks game_id via
+      _create_room/_join_room instead of _find_or_create_game, and a
+      chosen/created room is confirmed with `room` before anything else --
+      refused the same way if the name is already taken (create) or does
+      not exist (join).
+    - Neither: the ordinary shared game (_find_or_create_game), exactly
+      as before Room or Play existed."""
     username, password = await _read_login(websocket)
     if not _authenticate(db_conn, username, password):
         _log.warning("refused %s: bad password", username)
@@ -337,6 +483,14 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn):  
         await websocket.close()
         return
     room_choice = await _read_room_choice(websocket)
+    if room_choice is not None and room_choice[0] == protocol.PLAY:
+        matched = await _play_matchmaking(websocket, matchmaker, matchmaking, db_conn, username)
+        if matched is None:
+            await websocket.close()
+            return
+        game_id, color = matched
+        await _run_game_loop(websocket, registry, clients, game_id, color, username)
+        return
     if room_choice is None:
         game_id = _find_or_create_game(registry, default_game, username)
     else:
@@ -360,36 +514,60 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn):  
         await websocket.send(protocol.dumps(protocol.error("already_connected")))
         await websocket.close()
         return
-    clients[websocket] = (game_id, username)
-    _log.info("%s joined game %s as %s", username, game_id, color)
+    await websocket.send(protocol.dumps(protocol.assigned(color)))
+    await _run_game_loop(websocket, registry, clients, game_id, color, username)
+
+
+async def _seat_matched_pair(registry, clients, matchmaking, user_a, user_b):  # pragma: no cover
+    """Create a fresh game for `user_a`/`user_b` (a Play match, slide
+    5.1), join both, and tell each matchmaking("found") then
+    assigned(color), in that order -- protocol.matchmaking's own
+    docstring promises `found` is followed by `assigned`.
+
+    `matchmaking[username]` is always present here: matchmaker.advance()
+    can only return a username that was still in ITS OWN queue at that
+    exact moment, and _play_matchmaking -- the only thing that ever
+    removes a username from either the matchmaker or `matchmaking` --
+    always removes both together, synchronously, with no `await` between
+    the two removals.
+
+    A player whose socket already died while queued (a narrow race with
+    _play_matchmaking's own disconnect detection -- see its docstring) is
+    still seated here, since GameRegistry has no way to know otherwise,
+    but is immediately left again the moment its found/assigned send
+    fails: this hands the surviving opponent straight into the ordinary
+    disconnect countdown (Step 9) instead of leaving it waiting on a
+    partner who was never really there -- the same fix Step 9 already
+    made for the abandoned-default-game case."""
+    game_id = registry.create()
+    for username in (user_a, user_b):
+        websocket, future, rating = matchmaking[username]
+        color = registry.join(game_id, username)
+        try:
+            await websocket.send(protocol.dumps(protocol.matchmaking("found")))
+            await websocket.send(protocol.dumps(protocol.assigned(color)))
+        except websockets.ConnectionClosed:
+            registry.leave(game_id, username)
+            future.set_result(None)
+        else:
+            clients[websocket] = (game_id, username)
+            future.set_result((game_id, color))
+        _log.info("matched %s (rating %d) into game %s as %s",
+                   username, rating, game_id, color)
+
+
+async def _report_matchmaking_timeout(matchmaking, username):  # pragma: no cover
+    """Tell a timed-out seeker (slide 5: "pops up a message that can't
+    find") and release their _play_matchmaking coroutine. `matchmaking
+    [username]` is always present here -- see _seat_matched_pair's own
+    docstring for why."""
+    websocket, future, rating = matchmaking[username]
     try:
-        await websocket.send(protocol.dumps(protocol.assigned(color)))
-        await _send_state(websocket, registry.session(game_id))
-        async for raw in websocket:
-            try:
-                message = protocol.loads(raw)
-            except protocol.ProtocolError:
-                _log.exception("dropping malformed frame from %s in game %s",
-                                username, game_id)
-                continue
-            session = registry.session(game_id)
-            if session is None:
-                continue  # the game's linger period already elapsed
-            applied = session.submit(message, registry.color_of(game_id, username))
-            _log.info("%s %s from %s in game %s",
-                       "applied" if applied else "refused", message.get("type"),
-                       username, game_id)
-    finally:
-        clients.pop(websocket, None)
-        registry.leave(game_id, username)
-        _log.info("%s disconnected from game %s", username, game_id)
-        if color in ("w", "b"):
-            # A viewer leaving starts no countdown at all (see
-            # GameRegistry.leave), so nothing to log for that case --
-            # `color` is exactly the seat check that already distinguishes
-            # them, already known from the join() call above, no extra
-            # registry query needed.
-            _log.info("countdown started for %s in game %s", username, game_id)
+        await websocket.send(protocol.dumps(protocol.matchmaking("timeout")))
+    except websockets.ConnectionClosed:
+        pass
+    future.set_result(None)
+    _log.info("%s (rating %d) timed out waiting for a match", username, rating)
 
 
 def _winner_username(seats, winner):
@@ -403,17 +581,18 @@ def _winner_username(seats, winner):
     return next((user for user, color in seats.items() if color == winner), None)
 
 
-async def _tick_loop(registry, clients, ended_games):  # pragma: no cover, pylint: disable=too-many-locals, too-many-branches
+async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking):  # pragma: no cover, pylint: disable=too-many-locals, too-many-branches
     # A tick genuinely touches this many independent pieces (the summary
     # counters, the per-game client list reused for three different
-    # broadcasts, the countdown bookkeeping) -- splitting it up would just
-    # move names around, the same reasoning other disables in this file
-    # give. Three send-if-appropriate blocks (state, game_over, countdown)
-    # inside the same per-game loop is what pushes the branch count over
+    # broadcasts, the countdown bookkeeping, matchmaking) -- splitting it
+    # up would just move names around, the same reasoning other disables
+    # in this file give. Three send-if-appropriate blocks (state,
+    # game_over, countdown) inside the same per-game loop, plus the
+    # pairing/timeout handling, is what pushes the branch count over
     # pylint's default threshold -- each block is a few lines and reads
     # linearly, so splitting them into separate functions would trade one
-    # readable loop for three that all need the same game_clients list
-    # threaded through them.
+    # readable loop for several that all need the same game_clients list
+    # (or matchmaking box) threaded through them.
     """Advance every game by a fixed step on a fixed interval, then push
     each game's own snapshot only to the clients sitting in that game.
     Today every client shares one game (see _find_or_create_game); once
@@ -446,6 +625,16 @@ async def _tick_loop(registry, clients, ended_games):  # pragma: no cover, pylin
     Sent once per game, to whichever clients are connected to it at that
     moment -- the same clients its final `state` broadcast just went to.
 
+    Also runs Play's matchmaking (slide 5.1): matchmaker.advance(_TICK_MS)
+    once per tick, exactly like registry.advance -- time stays explicit
+    here too, per this step's own design doc. Every pair gets a fresh game
+    (_seat_matched_pair); every timeout gets told (_report_matchmaking_
+    timeout). Both also resolve that connection's own _play_matchmaking
+    future, which is the actual hand-off back to _handle_client's waiting
+    coroutine -- Bus-style pub/sub was not used here because there is
+    exactly one interested party per outcome (the seeker's own connection),
+    not an open set of subscribers.
+
     Also logs a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
     connected clients) -- never the per-tick broadcast itself; see
     _SUMMARY_INTERVAL_MS's comment for why not."""
@@ -455,6 +644,11 @@ async def _tick_loop(registry, clients, ended_games):  # pragma: no cover, pylin
     while True:
         await asyncio.sleep(_TICK_MS / 1000)
         registry.advance(_TICK_MS)
+        pairs, timed_out = matchmaker.advance(_TICK_MS)
+        for user_a, user_b in pairs:
+            await _seat_matched_pair(registry, clients, matchmaking, user_a, user_b)
+        for username in timed_out:
+            await _report_matchmaking_timeout(matchmaking, username)
         tick_count += 1
         ms_since_summary += _TICK_MS
         if ms_since_summary >= _SUMMARY_INTERVAL_MS:
@@ -621,13 +815,16 @@ async def _main():  # pragma: no cover
     registry = GameRegistry(_build_session, bus=bus, king_type=_CONFIG.king_type)
     clients = {}  # websocket -> (game_id, username)
     default_game = {"id": None}  # see _find_or_create_game
+    matchmaker = MatchMaker()  # slide 5.1 -- see _play_matchmaking
+    matchmaking = {}  # username -> (websocket, future, rating); see _play_matchmaking
 
     async def handler(websocket):
-        await _handle_client(websocket, registry, clients, default_game, db_conn)
+        await _handle_client(websocket, registry, clients, default_game, db_conn,
+                              matchmaker, matchmaking)
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)
-        await _tick_loop(registry, clients, ended_games)
+        await _tick_loop(registry, clients, ended_games, matchmaker, matchmaking)
 
 
 if __name__ == "__main__":  # pragma: no cover
