@@ -1,5 +1,5 @@
 from common.registry import GameRegistry
-from server import _create_room, _find_or_create_game, _join_room
+from server import _create_room, _find_or_create_game, _join_room, _reserve_username
 
 
 class _FakeSession:
@@ -126,3 +126,33 @@ def test_find_or_create_game_still_returns_the_original_player_to_their_seat():
     second = _find_or_create_game(registry, default_game, "alice")
 
     assert second == first
+
+
+# --- _reserve_username (Step 11: reject a duplicate login) -------------------
+#
+# The rest of this bug fix -- that the refusal happens before
+# _read_room_choice is ever called, and that an abnormal disconnect still
+# frees the name -- is a guarantee about _handle_client's own async control
+# flow (a duplicate check-and-refuse textually before the room choice is
+# ever read, and connected_usernames.discard(username) in an outer
+# try/finally covering every exit path), not something a synchronous unit
+# test of this pure function alone can observe. Server.py's connection
+# handling is deliberately not unit tested (see its own module docstring);
+# verified live instead, per STEP11_VISIBILITY.md's "Verify by eye".
+
+def test_reserve_username_succeeds_and_reserves_when_free():
+    connected = set()
+    assert _reserve_username(connected, "alice") is True
+    assert connected == {"alice"}
+
+
+def test_reserve_username_is_refused_and_does_not_reserve_when_already_connected():
+    connected = {"alice"}
+    assert _reserve_username(connected, "alice") is False
+    assert connected == {"alice"}  # unchanged -- not reserved a second time
+
+
+def test_a_freed_username_can_be_reserved_again():
+    connected = {"alice"}
+    connected.discard("alice")  # the cleanup _handle_client's finally performs
+    assert _reserve_username(connected, "alice") is True

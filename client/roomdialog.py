@@ -32,6 +32,8 @@ client.py's job; this only reports the player's choice.
 import tkinter as tk
 from tkinter import messagebox
 
+from common.validation import MAX_NAME_LENGTH, is_displayable
+
 CREATE = "create"
 JOIN = "join"
 PLAY = "play"
@@ -55,7 +57,14 @@ def ask_room(title="Room"):  # pragma: no cover -- opens a real window
     own close ("X"), and also for Create/Join pressed with an empty (or
     whitespace-only) box, which is treated the same as Play rather than
     sent on: a blank name must never reach the server. On a non-empty
-    Create/Join, `room_name` is normalize_room_name's result."""
+    Create/Join, `room_name` is normalize_room_name's result.
+
+    A name is_displayable rejects (Step 11: emoji and most other Unicode
+    have no glyph in cv2's built-in font, and would show as boxes or
+    garbage in the room indicator) shows the problem right here, in a
+    message box over this same still-open window, rather than being sent
+    on for the server to refuse -- there is no reason to make a round
+    trip to find out something this window can already tell."""
     result = [PLAY, ""]
     root = tk.Tk()
     root.title(title)
@@ -70,6 +79,12 @@ def ask_room(title="Room"):  # pragma: no cover -- opens a real window
             name = normalize_room_name(entry.get())
             if not name:
                 return  # empty box: stay open rather than send nothing
+            if not is_displayable(name):
+                messagebox.showerror(
+                    "Room",
+                    "Room names may only use letters, digits, spaces, "
+                    f"- and _, up to {MAX_NAME_LENGTH} characters.")
+                return  # stay open so the player can fix it
             result[0] = action
             result[1] = name
         root.destroy()

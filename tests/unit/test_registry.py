@@ -157,9 +157,69 @@ def test_session_of_an_unknown_id_returns_none():
     assert registry.session("no-such-game") is None
 
 
+def test_seats_returns_the_current_seat_map_including_viewers():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.join(game_id, "carol")  # viewer
+    assert registry.seats(game_id) == {"alice": "w", "bob": "b", "carol": "viewer"}
+
+
+def test_seats_on_an_unknown_game_returns_an_empty_mapping():
+    registry = GameRegistry(_FakeSession)
+    assert registry.seats("no-such-game") == {}
+
+
 def test_color_of_returns_none_for_an_unknown_game():
     registry = GameRegistry(_FakeSession)
     assert registry.color_of("no-such-game", "alice") is None
+
+
+# --- game_of (Step 12: Play returns a held seat instead of matchmaking) -----
+
+def test_game_of_returns_the_game_a_seated_username_is_in():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    assert registry.game_of("alice") == game_id
+
+
+def test_game_of_returns_none_for_a_username_with_no_seat_anywhere():
+    registry = GameRegistry(_FakeSession)
+    registry.create()
+    assert registry.game_of("alice") is None
+
+
+def test_game_of_still_finds_the_game_after_alice_disconnects():
+    # The seat is kept on leave() (Step 5/9), so this must keep finding
+    # the game even though alice is no longer connected -- that gap is
+    # exactly what a disconnect countdown counts down inside.
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.leave(game_id, "alice")
+    assert registry.game_of("alice") == game_id
+
+
+def test_game_of_returns_none_once_the_game_has_ended():
+    registry = GameRegistry(_capturing_session)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+    session = registry.session(game_id)
+    session.submit(protocol.move((0, 1), (0, 2)))
+    registry.advance(wait_for(1))  # captures, ends the game
+    assert registry.game_of("alice") is None
+
+
+def test_game_of_finds_a_viewer_seat_too():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.join(game_id, "carol")  # viewer
+    assert registry.game_of("carol") == game_id
 
 
 # --- advance --------------------------------------------------------------

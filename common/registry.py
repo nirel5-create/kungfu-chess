@@ -200,11 +200,43 @@ class GameRegistry:
             return None
         return game.seats.get(username)
 
+    def seats(self, game_id):
+        """-> {username: color} for every seat taken in `game_id`
+        (including viewers), or {} for an unknown game_id -- the same
+        tolerance color_of already shows. The same shape GAME_END's own
+        payload already carries, but for a LIVE, ongoing game: added so
+        the server can show each seat's real display name as it is
+        taken, not only once the game has ended (Step 11)."""
+        game = self._games.get(game_id)
+        if game is None:
+            return {}
+        return dict(game.seats)
+
     def session(self, game_id):
         """-> the GameSession for `game_id`, or None if it does not exist
         (never created, or removed after its linger period elapsed)."""
         game = self._games.get(game_id)
         return game.session if game is not None else None
+
+    def game_of(self, username):
+        """-> the game_id of a live game `username` already holds a seat
+        in (any seat: "w", "b", or "viewer"), or None if there is none.
+        "Live" means the game has not ended (game.session.game_over is
+        False) -- the same qualifier _find_or_create_game's own reconnect
+        exception already uses for the default game (server.py, Step 5),
+        generalized here to ANY game, not just the one default_game
+        remembers, for Play's own reconnect check (server.py, Step 12):
+        a seat in an already-ended game is not something to return a
+        player to.
+
+        A username can hold a seat in at most one live game at a time --
+        join() refuses a second, still-connected attempt with
+        AlreadyConnectedError, and a seat once given is never handed to a
+        different username -- so at most one game_id can ever match."""
+        for game_id, game in self._games.items():
+            if username in game.seats and not game.session.game_over:
+                return game_id
+        return None
 
     def game_ids(self):
         """-> a tuple of every currently-live game id."""

@@ -62,8 +62,40 @@ This file is what turns a pairing into an actual game (GameRegistry.create
 plus two joins) and a timeout into a message, and what looks up a rating in
 the first place (common.db.get_rating) -- none of that is MatchMaker's job.
 
+Step 11 fixes four things players could not see or do. Two are refusals
+moved earlier or added outright: a duplicate username is now refused at
+login (_reserve_username), before the Room dialog, not after; an
+undisplayable username or room name (common.validation.is_displayable) is
+refused before it ever reaches the score panel or room indicator as boxes
+or garbage. The other two give every client the server's own view of
+history: this file now runs its own common.capture_log.CaptureLog per
+game -- a server-side clone of view.observer.GameObserver's pure capture-
+detection algorithm, not an import of it (view/ is the client's OpenCV
+rendering stack, deliberately not part of the server's Docker image; see
+CaptureLog's own module docstring for the ModuleNotFoundError this fixes)
+-- fed the same snapshots the tick loop already produces, and sends the
+current log, scores and real display names (_send_history) whenever they
+change, and once, immediately, whenever a connection joins or reconnects
+(_run_game_loop) -- so a client that missed the start of the game,
+including a viewer who joined mid-game, sees the exact same history every
+other client does, computed once, here, rather than piecing together its
+own from whatever it happened to see. Real names replace "Player 1"/
+"Player 2" computed fresh from GameRegistry.seats every time
+(_seat_names), not from anything on CaptureLog -- it has no concept of
+names at all, only captures and score, precisely because a name can
+change (a seat gets taken) after a game already has one.
+
 Run with:  python server.py
 """
+# pylint: disable=too-many-lines
+# Four steps (5, 8, 9, 10, 11) of plumbing for one connection lifecycle
+# and one tick loop, each already broken into its own small function with
+# a clear single job -- the line count is many small, cohesive pieces
+# accumulated over real feature growth, not one function or one
+# responsibility that has grown unwieldy. Splitting the module itself
+# (e.g. matchmaking vs. room/default-game policy vs. the tick loop) is a
+# reasonable future cleanup, but is not part of implementing any single
+# step, so it is not done here.
 
 import asyncio
 import logging
@@ -72,9 +104,11 @@ import websockets
 
 from common import db, elo, net, protocol, topics
 from common.bus import Bus
+from common.capture_log import CaptureLog
 from common.logsetup import add_file_logging
 from common.matchmaker import MatchMaker
 from common.registry import AlreadyConnectedError, GameRegistry
+from common.validation import is_displayable
 from engine.game import GameEngine
 from model.board import Board
 from model.config import Config
@@ -202,6 +236,31 @@ def _authenticate(db_conn, username, password):  # pragma: no cover
         return True
 
 
+def _reserve_username(connected_usernames, username):
+    """Atomically check-and-reserve `username` server-wide: one connection
+    per account, regardless of which game or room it ends up in -- a
+    username is one person. -> True, and adds `username` to
+    `connected_usernames`, if it was free. -> False, leaving
+    `connected_usernames` untouched, if it was already there.
+
+    Refusing here, at login, is what fixes a bug found in manual testing:
+    the equivalent check inside GameRegistry.join (kept, unchanged, as a
+    second correct guard at the per-game layer) only runs after the
+    client's room choice is known, so a duplicate login used to be shown
+    the whole Room dialog before being refused -- wasted effort on a
+    dialog that could never succeed. This runs before _read_room_choice
+    is ever called (see _handle_client), so that never happens now.
+
+    The caller is responsible for removing `username` again on disconnect
+    -- including an abnormal one -- or a leak here locks that player out
+    of their own account until the server restarts; see _handle_client's
+    own try/finally for where that happens."""
+    if username in connected_usernames:
+        return False
+    connected_usernames.add(username)
+    return True
+
+
 def _rating_for_matchmaking(db_conn, username):  # pragma: no cover
     """-> `username`'s rating, for Play's pairing window (slide 5.1).
     Falls back to db.DEFAULT_RATING -- logged, never raised -- when
@@ -308,18 +367,64 @@ async def _play_matchmaking(websocket, matchmaker, matchmaking,
         matchmaking.pop(username, None)
 
 
+def _observer_for(observers, game_id):  # pragma: no cover
+    """-> the CaptureLog for `game_id`, creating one the first time it is
+    asked for. Shared by _run_game_loop (an immediate send when a
+    connection joins or reconnects) and _tick_loop (the ongoing
+    send-on-change broadcast), so whichever runs first for a given
+    game_id is the one that actually creates it; the other just reuses
+    it."""
+    observer = observers.get(game_id)
+    if observer is None:
+        observer = CaptureLog(_CONFIG)
+        observers[game_id] = observer
+    return observer
+
+
+def _seat_names(seats):  # pragma: no cover
+    """-> (white_name, black_name): the CURRENT username seated at each
+    color, or "Player 1"/"Player 2" for a seat nobody has taken yet.
+
+    Computed fresh from `seats` (GameRegistry.seats(game_id)) every time:
+    CaptureLog (see its own module docstring) has no concept of names at
+    all, precisely because a name can change -- a seat gets taken --
+    after a game already has one, and a game can easily already have a
+    CaptureLog (created on its very first tick, before anyone has joined)
+    by the time its second seat is taken. This is what lets a placeholder
+    become a real name the moment that seat is taken (Step 11)."""
+    white = next((user for user, color in seats.items() if color == "w"), None)
+    black = next((user for user, color in seats.items() if color == "b"), None)
+    return white or "Player 1", black or "Player 2"
+
+
+async def _send_history(websocket, observers, registry, game_id):  # pragma: no cover
+    """Send `game_id`'s current move log, scores and names to `websocket`
+    -- used for an immediate send when a connection joins or reconnects
+    (_run_game_loop), so it is never left showing an empty panel just
+    because it was not there for the captures that already happened
+    (Step 11) -- a viewer joining mid-game gets this too, for the same
+    reason and at no extra cost. _tick_loop's own send-on-change
+    broadcast builds the same message itself, for potentially many
+    recipients at once, rather than calling this once per recipient."""
+    observer = _observer_for(observers, game_id)
+    white_name, black_name = _seat_names(registry.seats(game_id))
+    message = protocol.dumps(protocol.history(
+        white_name, black_name, observer.score_of("w"), observer.score_of("b"), observer.log()))
+    await websocket.send(message)
+
+
 async def _run_game_loop(websocket, registry, clients, game_id,
-                          color, username):  # pragma: no cover
+                          color, username, observers):  # pragma: no cover
     # pylint: disable=too-many-arguments, too-many-positional-arguments
-    # Six independent pieces of context every caller already has in hand
-    # (the connection, the two collaborators from _main, and the seat this
-    # particular connection just got, however it got it) -- the same
-    # reasoning every other disable in this file gives.
-    """Register the connection in `clients`, send the current state, then
-    read and apply commands until it disconnects -- shared by every path
-    that ends with a seat in a game (the shared default game, a room, or a
-    Play match), so there is exactly one place that runs the command loop
-    and exactly one place that cleans up after it.
+    # Seven independent pieces of context every caller already has in
+    # hand (the connection, the three collaborators from _main, and the
+    # seat this particular connection just got, however it got it) --
+    # the same reasoning every other disable in this file gives.
+    """Register the connection in `clients`, send the current state and
+    history, then read and apply commands until it disconnects -- shared
+    by every path that ends with a seat in a game (the shared default
+    game, a room, or a Play match), so there is exactly one place that
+    runs the command loop and exactly one place that cleans up after it.
 
     Does NOT send `assigned`: the shared/room paths send it themselves
     right before calling this; a Play match already had it sent by
@@ -329,6 +434,7 @@ async def _run_game_loop(websocket, registry, clients, game_id,
     _log.info("%s joined game %s as %s", username, game_id, color)
     try:
         await _send_state(websocket, registry.session(game_id))
+        await _send_history(websocket, observers, registry, game_id)
         async for raw in websocket:
             try:
                 message = protocol.loads(raw)
@@ -445,11 +551,34 @@ def _join_room(registry, room_id):
     return room_id
 
 
+async def _join_or_refuse(websocket, registry, game_id, username):  # pragma: no cover
+    """registry.join(game_id, username), or -- on AlreadyConnectedError --
+    send `error`, close `websocket`, and return None. -> the assigned
+    color on success. Shared by every path in _handle_client that ends
+    with a direct registry.join call, so the refuse-and-close sequence is
+    written once. In practice this exception should not fire any more
+    (the server-wide _reserve_username check already refuses a duplicate
+    login before this is ever reached), but GameRegistry's own per-game
+    check is kept regardless -- see _handle_client's own docstring -- so
+    this still handles it correctly if it ever does."""
+    try:
+        return registry.join(game_id, username)
+    except AlreadyConnectedError:
+        _log.warning("refused %s: already connected to game %s", username, game_id)
+        await websocket.send(protocol.dumps(protocol.error("already_connected")))
+        await websocket.close()
+        return None
+
+
 async def _handle_client(websocket, registry, clients, default_game, db_conn,
-                          matchmaker, matchmaking):  # pragma: no cover
-                          # pylint: disable=too-many-locals, too-many-arguments, too-many-positional-arguments
+                          matchmaker, matchmaking, connected_usernames,
+                          observers):  # pragma: no cover
+                          # pylint: disable=too-many-locals, too-many-arguments
+                          # pylint: disable=too-many-positional-arguments
+                          # pylint: disable=too-many-return-statements, too-many-branches
+                          # pylint: disable=too-many-statements
     # One coroutine genuinely touches this many independent pieces of
-    # state (the connection, five collaborators threaded in from _main,
+    # state (the connection, seven collaborators threaded in from _main,
     # and everything the login/room/play/command-loop steps compute along
     # the way) -- splitting it up would just move names around, the same
     # reasoning client.py's build_client/run give their own disables.
@@ -459,63 +588,109 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn,
     current state, and applies every command it sends -- checked against
     its seat by GameSession.submit -- until it disconnects.
 
-    A wrong password (_authenticate) or a username already connected to
-    the game it would join (GameRegistry.AlreadyConnectedError) both get
-    refused outright -- an `error`, then close, before `clients` or
-    GameRegistry.join is ever touched, so neither reaches _run_game_loop.
+    Four things refuse a connection outright -- an `error`, then close,
+    before `clients` or GameRegistry.join is ever touched: an
+    undisplayable username (Step 11, is_displayable -- checked first, so
+    a name cv2 cannot even draw never reaches a password check or the
+    database), a wrong password (_authenticate), a username already
+    connected ANYWHERE on this server (_reserve_username -- checked next,
+    before _read_room_choice is ever called, so a duplicate login never
+    even sees the Room dialog), or one already connected to the specific
+    game it would join (GameRegistry.AlreadyConnectedError -- a second,
+    still-correct guard at the per-game layer, now normally unreachable
+    since the server-wide check above already covers it).
+
+    Once reserved, `username` is released in the outer `finally` no
+    matter how this coroutine ends -- normal disconnect, refusal further
+    down (room_exists, invalid_room_name, ...), or an unexpected
+    exception -- so a player is never locked out of their own account by
+    a connection that ended abnormally.
 
     Three ways to get a seat, from the client's optional second message
     right after login (see _read_room_choice):
-    - Play (slide 5.1): matchmaking instead of a game -- _play_matchmaking
-      enqueues this connection and waits for _tick_loop to pair or time it
-      out; a timeout closes the connection with no game ever entered.
+    - Play (slide 5.1): GameRegistry.game_of(username) first, in case this
+      is a reconnect -- a player whose disconnect countdown (Step 9) is
+      still running, or who simply still holds a seat, must return to
+      that seat, not be queued to search for a new opponent while their
+      own held seat sits there waiting for them (Step 12). Only once
+      game_of finds nothing does this fall through to matchmaking:
+      _play_matchmaking enqueues this connection and waits for _tick_loop
+      to pair or time it out; a timeout closes the connection with no
+      game ever entered.
     - Room (slide 6): room_create or room_join picks game_id via
       _create_room/_join_room instead of _find_or_create_game, and a
       chosen/created room is confirmed with `room` before anything else --
-      refused the same way if the name is already taken (create) or does
-      not exist (join).
+      refused the same way if the name is undisplayable (Step 11), already
+      taken (create), or does not exist (join). Room names a specific
+      game, so it has no equivalent reconnect check of its own to make --
+      joining the same room again already lands back on the same seat via
+      the ordinary GameRegistry.join path below.
     - Neither: the ordinary shared game (_find_or_create_game), exactly
-      as before Room or Play existed."""
+      as before Room or Play existed -- it already has its own equivalent
+      reconnect exception, for the one default game it remembers."""
     username, password = await _read_login(websocket)
+    if not is_displayable(username):
+        _log.warning("refused %s: undisplayable username", username)
+        await websocket.send(protocol.dumps(protocol.error("invalid_username")))
+        await websocket.close()
+        return
     if not _authenticate(db_conn, username, password):
         _log.warning("refused %s: bad password", username)
         await websocket.send(protocol.dumps(protocol.error("bad_password")))
         await websocket.close()
         return
-    room_choice = await _read_room_choice(websocket)
-    if room_choice is not None and room_choice[0] == protocol.PLAY:
-        matched = await _play_matchmaking(websocket, matchmaker, matchmaking, db_conn, username)
-        if matched is None:
-            await websocket.close()
-            return
-        game_id, color = matched
-        await _run_game_loop(websocket, registry, clients, game_id, color, username)
-        return
-    if room_choice is None:
-        game_id = _find_or_create_game(registry, default_game, username)
-    else:
-        action, room_id = room_choice
-        if action == protocol.ROOM_CREATE:
-            game_id = _create_room(registry, room_id)
-            refusal = "room_exists"
-        else:
-            game_id = _join_room(registry, room_id)
-            refusal = "no_such_room"
-        if game_id is None:
-            _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
-            await websocket.send(protocol.dumps(protocol.error(refusal)))
-            await websocket.close()
-            return
-        await websocket.send(protocol.dumps(protocol.room(game_id)))
-    try:
-        color = registry.join(game_id, username)
-    except AlreadyConnectedError:
-        _log.warning("refused %s: already connected to game %s", username, game_id)
+    if not _reserve_username(connected_usernames, username):
+        _log.warning("refused %s: already connected", username)
         await websocket.send(protocol.dumps(protocol.error("already_connected")))
         await websocket.close()
         return
-    await websocket.send(protocol.dumps(protocol.assigned(color)))
-    await _run_game_loop(websocket, registry, clients, game_id, color, username)
+    try:
+        room_choice = await _read_room_choice(websocket)
+        if room_choice is not None and room_choice[0] == protocol.PLAY:
+            held_game_id = registry.game_of(username)
+            if held_game_id is not None:
+                color = await _join_or_refuse(websocket, registry, held_game_id, username)
+                if color is None:
+                    return
+                await websocket.send(protocol.dumps(protocol.assigned(color)))
+                await _run_game_loop(websocket, registry, clients, held_game_id, color,
+                                      username, observers)
+                return
+            matched = await _play_matchmaking(websocket, matchmaker, matchmaking, db_conn, username)
+            if matched is None:
+                await websocket.close()
+                return
+            game_id, color = matched
+            await _run_game_loop(websocket, registry, clients, game_id, color, username, observers)
+            return
+        if room_choice is None:
+            game_id = _find_or_create_game(registry, default_game, username)
+        else:
+            action, room_id = room_choice
+            if not is_displayable(room_id):
+                _log.warning("refused %s: undisplayable room name %r", username, room_id)
+                await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
+                await websocket.close()
+                return
+            if action == protocol.ROOM_CREATE:
+                game_id = _create_room(registry, room_id)
+                refusal = "room_exists"
+            else:
+                game_id = _join_room(registry, room_id)
+                refusal = "no_such_room"
+            if game_id is None:
+                _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
+                await websocket.send(protocol.dumps(protocol.error(refusal)))
+                await websocket.close()
+                return
+            await websocket.send(protocol.dumps(protocol.room(game_id)))
+        color = await _join_or_refuse(websocket, registry, game_id, username)
+        if color is None:
+            return
+        await websocket.send(protocol.dumps(protocol.assigned(color)))
+        await _run_game_loop(websocket, registry, clients, game_id, color, username, observers)
+    finally:
+        connected_usernames.discard(username)
 
 
 async def _seat_matched_pair(registry, clients, matchmaking, user_a, user_b):  # pragma: no cover
@@ -581,18 +756,23 @@ def _winner_username(seats, winner):
     return next((user for user, color in seats.items() if color == winner), None)
 
 
-async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking):  # pragma: no cover, pylint: disable=too-many-locals, too-many-branches
+async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking,
+                      observers):  # pragma: no cover
+                      # pylint: disable=too-many-locals, too-many-branches
+                      # pylint: disable=too-many-statements, too-many-arguments
+                      # pylint: disable=too-many-positional-arguments
     # A tick genuinely touches this many independent pieces (the summary
-    # counters, the per-game client list reused for three different
-    # broadcasts, the countdown bookkeeping, matchmaking) -- splitting it
-    # up would just move names around, the same reasoning other disables
-    # in this file give. Three send-if-appropriate blocks (state,
-    # game_over, countdown) inside the same per-game loop, plus the
-    # pairing/timeout handling, is what pushes the branch count over
-    # pylint's default threshold -- each block is a few lines and reads
-    # linearly, so splitting them into separate functions would trade one
-    # readable loop for several that all need the same game_clients list
-    # (or matchmaking box) threaded through them.
+    # counters, the per-game client list reused for four different
+    # broadcasts, the countdown bookkeeping, matchmaking, the per-game
+    # observers) -- splitting it up would just move names around, the
+    # same reasoning other disables in this file give. Four
+    # send-if-appropriate blocks (state, game_over, history, countdown)
+    # inside the same per-game loop, plus the pairing/timeout handling,
+    # is what pushes the branch and statement counts over pylint's
+    # default threshold -- each block is a few lines and reads linearly,
+    # so splitting them into separate functions would trade one readable
+    # loop for several that all need the same game_clients list (or
+    # matchmaking/observers box) threaded through them.
     """Advance every game by a fixed step on a fixed interval, then push
     each game's own snapshot only to the clients sitting in that game.
     Today every client shares one game (see _find_or_create_game); once
@@ -635,12 +815,25 @@ async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking):  
     exactly one interested party per outcome (the seeker's own connection),
     not an open set of subscribers.
 
+    Also runs each game's own CaptureLog (Step 11) and broadcasts its
+    current log/scores/names whenever they change: `observer.observe` runs
+    every tick, unconditionally, same as the observer's own docstring
+    expects ("called as often or as rarely as the view likes"), but the
+    actual `history` message is only sent when `(log length, white_name,
+    black_name)` differs from `last_history_sent[game_id]` -- log length
+    alone is enough to also cover score, since a score only ever changes
+    together with a new log entry. `observers`/`last_history_sent` are
+    pruned for any game_id no longer in registry.game_ids() at the end of
+    each tick, so a finished-and-removed game's observer is not kept
+    forever.
+
     Also logs a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
     connected clients) -- never the per-tick broadcast itself; see
     _SUMMARY_INTERVAL_MS's comment for why not."""
     tick_count = 0
     ms_since_summary = 0
     last_countdown_seconds = {}  # (game_id, username) -> last-sent whole seconds
+    last_history_sent = {}  # game_id -> (log length, white_name, black_name)
     while True:
         await asyncio.sleep(_TICK_MS / 1000)
         registry.advance(_TICK_MS)
@@ -691,6 +884,20 @@ async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking):  
                         await websocket.send(game_over_message)
                     except websockets.ConnectionClosed:
                         dead.add(websocket)
+            observer = _observer_for(observers, game_id)
+            observer.observe(session.snapshot(), tick_count * _TICK_MS)
+            white_name, black_name = _seat_names(registry.seats(game_id))
+            history_key = (len(observer.log()), white_name, black_name)
+            if last_history_sent.get(game_id) != history_key:
+                last_history_sent[game_id] = history_key
+                history_message = protocol.dumps(protocol.history(
+                    white_name, black_name,
+                    observer.score_of("w"), observer.score_of("b"), observer.log()))
+                for websocket in game_clients:
+                    try:
+                        await websocket.send(history_message)
+                    except websockets.ConnectionClosed:
+                        dead.add(websocket)
             for username, ms_left in registry.countdown_ms(game_id).items():
                 seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
                 key = (game_id, username)
@@ -704,6 +911,10 @@ async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking):  
                     except websockets.ConnectionClosed:
                         dead.add(websocket)
         last_countdown_seconds = current_countdown_seconds
+        live_game_ids = set(registry.game_ids())
+        for stale_id in set(observers) - live_game_ids:
+            del observers[stale_id]
+            last_history_sent.pop(stale_id, None)
         for websocket in dead:
             clients.pop(websocket, None)
 
@@ -817,14 +1028,16 @@ async def _main():  # pragma: no cover
     default_game = {"id": None}  # see _find_or_create_game
     matchmaker = MatchMaker()  # slide 5.1 -- see _play_matchmaking
     matchmaking = {}  # username -> (websocket, future, rating); see _play_matchmaking
+    connected_usernames = set()  # Step 11 -- see _reserve_username
+    observers = {}  # game_id -> CaptureLog; Step 11 -- see _observer_for
 
     async def handler(websocket):
         await _handle_client(websocket, registry, clients, default_game, db_conn,
-                              matchmaker, matchmaking)
+                              matchmaker, matchmaking, connected_usernames, observers)
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)
-        await _tick_loop(registry, clients, ended_games, matchmaker, matchmaking)
+        await _tick_loop(registry, clients, ended_games, matchmaker, matchmaking, observers)
 
 
 if __name__ == "__main__":  # pragma: no cover

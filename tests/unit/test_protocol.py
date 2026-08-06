@@ -3,7 +3,7 @@ import json
 import pytest
 
 from common import protocol
-from common.protocol import ProtocolError
+from common.protocol import CaptureEntry, ProtocolError
 from model.board import Board
 from model.config import Config
 from model.position import Position
@@ -109,6 +109,53 @@ def test_game_over_with_no_winner_has_no_winner_username_either():
     message = protocol.game_over(None)
     assert message["winner"] is None
     assert message["winner_username"] is None
+
+
+# --- history (Step 11: move log, scores, real names) ------------------------
+
+def test_history_message_type_matches_its_constant():
+    message = protocol.history("alice", "bob", 3, 5, ())
+    assert message["type"] == protocol.HISTORY
+
+
+def test_history_round_trips_with_names_scores_and_an_empty_log():
+    message = protocol.history("alice", "bob", 3, 5, ())
+    round_tripped = protocol.loads(protocol.dumps(message))
+    assert round_tripped["white_name"] == "alice"
+    assert round_tripped["black_name"] == "bob"
+    assert round_tripped["white_score"] == 3
+    assert round_tripped["black_score"] == 5
+    assert round_tripped["log"] == []
+
+
+def test_a_history_missing_a_required_field_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({
+            "type": protocol.HISTORY, "white_name": "alice", "black_name": "bob",
+            "white_score": 0, "black_score": 0,
+        }))  # "log" missing
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+def test_decode_capture_log_round_trips_capture_entries_in_order():
+    log = (
+        CaptureEntry(capturer_color="w", victim_token="bP", cost=1, clock_ms=500),
+        CaptureEntry(capturer_color="b", victim_token="wN", cost=3, clock_ms=1500),
+    )
+    message = protocol.history("alice", "bob", 1, 3, log)
+    round_tripped = protocol.loads(protocol.dumps(message))
+    decoded = protocol.decode_capture_log(round_tripped["log"])
+    assert decoded == log
+
+
+def test_decode_capture_log_of_an_empty_list_is_an_empty_tuple():
+    assert protocol.decode_capture_log([]) == ()
+
+
+def test_decode_capture_log_raises_bad_payload_on_a_malformed_entry():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.decode_capture_log([{"capturer_color": "w"}])  # missing fields
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
 
 
 def test_a_move_whose_src_is_not_a_two_element_int_list_raises_bad_payload():

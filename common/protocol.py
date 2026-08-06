@@ -21,9 +21,29 @@ and nowhere else.
 """
 
 import json
+from collections import namedtuple
 
 from model.position import Position
 from model.snapshot import GameSnapshot, PieceView
+
+# view.observer.CaptureEntry has this exact shape (capturer_color,
+# victim_token, cost, clock_ms), and importing it directly was tried first
+# -- but it broke the server in Docker: view/ is the client's OpenCV
+# rendering stack and is deliberately not copied into the server image
+# (see Dockerfile), so `from view.observer import CaptureEntry` raised
+# ModuleNotFoundError at startup, every time, in the container only (the
+# unit suite never catches this, since view/ exists on the host). view/
+# observer.py is also frozen and cannot be changed to import this
+# definition from common/ instead. So this is protocol.py's own
+# wire-level equivalent -- common/ must depend on nothing above it,
+# exactly as common/db.py, common/registry.py and the rest of this
+# package already do. Never compared to or constructed from a real
+# view.observer.CaptureEntry: namedtuple equality is by value, not by
+# class, and every reader of a decoded log (client.panel_overlay.
+# PanelOverlay, view/score_panel.py's frozen ScorePanel) only ever reads
+# these same four fields by name, so a matching value works identically
+# regardless of which of the two classes produced it.
+CaptureEntry = namedtuple("CaptureEntry", "capturer_color victim_token cost clock_ms")
 
 # --- message type names -------------------------------------------------
 
@@ -41,6 +61,7 @@ ASSIGNED = "assigned"
 COUNTDOWN = "countdown"
 GAME_OVER = "game_over"
 MATCHMAKING = "matchmaking"
+HISTORY = "history"
 ROOM = "room"
 ERROR = "error"
 
@@ -60,6 +81,7 @@ _REQUIRED_FIELDS = {
     COUNTDOWN: ("seconds",),
     GAME_OVER: ("winner", "winner_username"),
     MATCHMAKING: ("status",),
+    HISTORY: ("white_name", "black_name", "white_score", "black_score", "log"),
     ROOM: ("id",),
     ERROR: ("reason",),
 }
@@ -242,6 +264,65 @@ def matchmaking(status):
     (an `assigned` message follows); `"timeout"` means the search gave up and the
     client must send `play` again to retry."""
     return {"type": MATCHMAKING, "status": status}
+
+
+def history(white_name, black_name, white_score, black_score, log):
+    """The current move log, scores, and display names for a game (Step
+    11), sent whenever any of them changes and once, immediately, when a
+    connection joins or reconnects -- see server.py's _tick_loop and
+    _run_game_loop. Every client watching the same game sees the exact
+    same thing, computed once by the server's own common.capture_log.
+    CaptureLog, since it is the one thing every client -- including one
+    that joined mid-game with no history of its own -- needs and cannot
+    otherwise have.
+
+    white_name/black_name are the CURRENT username seated at each color,
+    or "Player 1"/"Player 2" for a seat nobody has taken yet -- a
+    placeholder is replaced the moment that seat is taken, never the
+    other way around. white_score/black_score are each side's running
+    total (the summed cost of the pieces it has captured).
+
+    `log` is a sequence of CaptureEntry (capturer_color, victim_token,
+    cost, clock_ms), oldest first; encoded here field by field, the same
+    way encode_snapshot encodes a GameSnapshot's pieces -- see
+    decode_capture_log for the reverse. Sent as the FULL log every time,
+    never a delta or an append: the full-snapshot decision this module's
+    own docstring explains for `state` applies here for exactly the same
+    reason -- a client that missed an earlier `history` message (or one
+    that just joined) resyncs correctly with no merge logic."""
+    return {
+        "type": HISTORY,
+        "white_name": white_name,
+        "black_name": black_name,
+        "white_score": white_score,
+        "black_score": black_score,
+        "log": [_encode_capture_entry(entry) for entry in log],
+    }
+
+
+def _encode_capture_entry(entry):
+    return {
+        "capturer_color": entry.capturer_color,
+        "victim_token": entry.victim_token,
+        "cost": entry.cost,
+        "clock_ms": entry.clock_ms,
+    }
+
+
+def decode_capture_log(data):
+    """list of encoded entries (see history's own docstring) -> tuple of
+    this module's own CaptureEntry, oldest first. Raises
+    ProtocolError(BAD_PAYLOAD) on anything malformed, the same promise
+    decode_snapshot already keeps for its own field."""
+    try:
+        return tuple(
+            CaptureEntry(capturer_color=item["capturer_color"],
+                         victim_token=item["victim_token"],
+                         cost=item["cost"], clock_ms=item["clock_ms"])
+            for item in data
+        )
+    except (KeyError, TypeError) as exc:
+        raise ProtocolError(ProtocolError.BAD_PAYLOAD) from exc
 
 
 def room(room_id):

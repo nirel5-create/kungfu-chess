@@ -32,19 +32,27 @@ persistence: this is presentation only (slide 3); the account system is a
 later step. Which color this client is assigned is decided by the server
 from connection order, not from anything this file sends or asserts.
 
-Score, move log, sound and the start banner are wired through one
-common.bus.Bus (Step 6): build_client subscribes GameObserver (frozen,
-untouched -- wrapped in a lambda, never edited), client.events.GameEventSource,
+Move log, sound and the start banner are wired through one common.bus.Bus
+(Step 6): build_client subscribes client.events.GameEventSource,
 client.sound.SoundPlayer and client.overlay.BannerOverlay to it, and the draw
 loop below only ever calls bus.publish(topics.SNAPSHOT, snapshot) -- it never
 names who reacts. Adding a future subscriber never touches this loop; that is
-the whole point of routing these four through a bus instead of direct calls.
+the whole point of routing these three through a bus instead of direct calls.
 
-The end banner's TEXT is the one exception: it names the winner by username,
-which GameEventSource's snapshot-only view can never know (see its own module
-docstring), so run() calls banner.show_result directly once the server's own
-`game_over` message (_ServerLink.result()) has actually named an outcome,
-rather than through the bus.
+Score and the move log's TEXT are the exception (Step 11): ScorePanel
+(frozen) now reads client.panel_overlay.PanelOverlay, an adapter over
+_ServerLink.history() -- not a client-side GameObserver computing its own log
+from only the snapshots this window happened to see, which used to mean an
+empty panel for anyone who joined or reconnected mid-game. The server runs
+its own GameObserver per game instead (server.py) and sends the current log,
+scores and names in a `history` message, so every client shows the exact
+same thing.
+
+The end banner's TEXT is the other exception: it names the winner by
+username, which GameEventSource's snapshot-only view can never know (see its
+own module docstring), so run() calls banner.show_result directly once the
+server's own `game_over` message (_ServerLink.result()) has actually named an
+outcome, rather than through the bus.
 
 Run with:  python client.py
 """
@@ -54,6 +62,7 @@ import getpass
 import logging
 import threading
 import time
+from collections import namedtuple
 
 import cv2
 import numpy as np
@@ -61,6 +70,7 @@ import websockets
 
 from client.events import GameEventSource
 from client.overlay import BannerOverlay, CountdownOverlay
+from client.panel_overlay import PanelOverlay
 from client.roomdialog import CREATE, JOIN, PLAY, ask_room, show_no_opponent_found
 from client.sound import SoundPlayer
 from common import net, protocol, topics
@@ -71,7 +81,6 @@ from input.controller import Controller
 from model.config import Config
 from view.animation_set import AnimationSet
 from view.img import Img
-from view.observer import GameObserver
 from view.renderer import Renderer
 from view.score_panel import ScorePanel
 from view.sprite_library import SpriteLibrary
@@ -92,6 +101,11 @@ _log = logging.getLogger(__name__)
 # Matches server.py's Config exactly, so the pixel positions inside every
 # snapshot line up with the sprites drawn from this same crystal-board asset.
 _CONFIG = Config(cell_size=98, board_offset=(13, 15))
+
+# The decoded shape of a server `history` message (Step 11) -- see
+# _ServerLink.history() and client.panel_overlay.PanelOverlay, which reads
+# exactly these five fields.
+_History = namedtuple("_History", "white_name black_name white_score black_score log")
 
 
 class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attributes
@@ -136,6 +150,7 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._countdown_updated_at = None  # time.time() of the last countdown message
         self._result = None  # (winner, winner_username) once `game_over` arrives -- see result()
         self._matchmaking_status = None  # "searching"/"found"/"timeout" -- see matchmaking_status()
+        self._history = None  # _History once a `history` message arrives -- see history()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -226,6 +241,19 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         with self._lock:
             return self._matchmaking_status
 
+    def history(self):
+        """-> the latest _History(white_name, black_name, white_score,
+        black_score, log) from the server's own `history` message (Step
+        11), or None before one has arrived -- read by
+        client.panel_overlay.PanelOverlay, ScorePanel's adapter for this
+        data. The server sends this on every change and, separately,
+        immediately whenever this connection joins or reconnects (see
+        server.py's _run_game_loop), so a client that joined mid-game
+        still sees the full log and scores from the very first one it
+        receives, not just changes from that point on."""
+        with self._lock:
+            return self._history
+
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
         thread's loop and returns immediately; silently drops the message if
@@ -297,6 +325,14 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                     with self._lock:
                         self._matchmaking_status = message["status"]
                     _log.info("matchmaking: %s", message["status"])
+                elif message["type"] == protocol.HISTORY:
+                    log = protocol.decode_capture_log(message["log"])
+                    with self._lock:
+                        self._history = _History(
+                            white_name=message["white_name"], black_name=message["black_name"],
+                            white_score=message["white_score"], black_score=message["black_score"],
+                            log=log)
+                    _log.info("history: %d entries", len(log))
             _log.info("disconnected from %s", self._uri)
 
 
@@ -496,13 +532,19 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     renderer = Renderer(sprites, lambda p: Img().read(p), _BOARD_PNG,
                         animation=animations.frame)
 
-    observer = GameObserver(_CONFIG)
     # Two _PANEL_LINE_H slots below _PANEL_TOP -- the mute and room
     # indicators (see the draw loop) each take one of the slots above this,
     # so ScorePanel's own content starts right after both instead of
     # overlapping them (room used to be drawn on top of ScorePanel's first
     # line -- a bug found by testing Step 7).
-    panel = ScorePanel(observer, x=image_w + 20, y=_PANEL_TOP + 2 * _PANEL_LINE_H)
+    #
+    # Reads from PanelOverlay(link), not a real GameObserver: the server
+    # runs its own GameObserver per game and sends the current log/scores/
+    # names in a `history` message (Step 11), so every client shows the
+    # same history -- including one that joined mid-game, which a
+    # client-side GameObserver (computing its own log from only what it
+    # happened to see) could never do.
+    panel = ScorePanel(PanelOverlay(link), x=image_w + 20, y=_PANEL_TOP + 2 * _PANEL_LINE_H)
     banner = BannerOverlay()
     # Not wired to the bus like banner above: its number comes straight from
     # link.countdown() every frame in run()'s loop (see CountdownOverlay's
@@ -518,14 +560,6 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # of the same fact.
     event_source = GameEventSource(bus, promotions=_CONFIG.promotions)
 
-    # elapsed_ms is a run()-loop concept (a wall-clock stopwatch); observe()
-    # needs it, but the bus only ever passes one payload (the snapshot). This
-    # tiny mutable box is written by run()'s loop just before every publish
-    # and read by the lambda below -- the "tiny lambda supplying elapsed_ms"
-    # that lets GameObserver subscribe unmodified.
-    clock = {"elapsed_ms": 0}
-    bus.subscribe(topics.SNAPSHOT,
-                  lambda snapshot: observer.observe(snapshot, clock["elapsed_ms"]))
     bus.subscribe(topics.SNAPSHOT, event_source.on_snapshot)
     bus.subscribe(topics.SOUND, sound_player.on_sound)
     bus.subscribe(topics.GAME_START, banner.on_game_start)
@@ -539,7 +573,7 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # -- see run() for why it waits rather than reading link.result() from
     # inside this bus callback.
 
-    return controller, renderer, link, bus, clock, banner, countdown_overlay, panel, sound_player
+    return controller, renderer, link, bus, banner, countdown_overlay, panel, sound_player
 
 
 def _wait_for_login_error(link, timeout_s=2.0, poll_interval=0.02):  # pragma: no cover
@@ -597,27 +631,42 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
 
 def _wait_for_matchmaking_outcome(link, poll_interval=0.02):  # pragma: no cover
     """Block until Play's search (slide 5.1) resolves: matchmaking_status()
-    becomes "found" or "timeout", or a refusal (error()) arrives. Prints
-    once, the moment "searching" is first seen, so the player is not left
-    staring at nothing for up to the minute the search is allowed to run
-    (see protocol.matchmaking's own docstring for the three states) --
-    printed here, not in run(), so the "only once" bookkeeping stays local
-    to the one place that needs it.
+    becomes "found" or "timeout", a seat arrives directly (color() becomes
+    non-None -- see below for why that is its own, equally valid way out),
+    or a refusal (error()) arrives. Prints once, the moment "searching" is
+    first seen, so the player is not left staring at nothing for up to the
+    minute the search is allowed to run (see protocol.matchmaking's own
+    docstring for the three states) -- printed here, not in run(), so the
+    "only once" bookkeeping stays local to the one place that needs it.
 
     Only called when run() sent protocol.play() -- see its own docstring
     for why a Room/default-game connection never needs this at all.
 
-    On "found", the caller (run()) falls through into the ordinary
-    _wait_for_assignment_or_error above: the server always sends `assigned`
-    right after matchmaking("found") -- protocol.matchmaking's own
-    docstring promises it -- so nothing new is needed to pick that up."""
+    A returning player whose held seat is still theirs (Step 12) skips
+    matchmaking entirely server-side: _handle_client sends `assigned`
+    straight away, with no `matchmaking` message at all -- not "found",
+    not even "searching", since nothing was actually searched for. Waiting
+    only for matchmaking_status() to change would then wait forever, since
+    it would stay None; color() becoming non-None is what actually signals
+    a seat has arrived either way, "found" or a direct reconnect, so it is
+    checked here directly rather than assuming `found` always precedes it.
+    That is also why "Searching for an opponent" never gets printed for a
+    reconnect: this loop exits before `status` is ever "searching", because
+    it was never sent.
+
+    Either way, the caller (run()) falls through into the ordinary
+    _wait_for_assignment_or_error above once this returns, which is a
+    no-op if color() is already set -- there is no second case to handle
+    for "found" specifically versus a direct reconnect; both just mean
+    "a seat has arrived", which is exactly what that function already
+    waits for."""
     printed_searching = False
     while True:
         status = link.matchmaking_status()
         if not printed_searching and status == "searching":
             print("Searching for an opponent (up to 1 minute)...")
             printed_searching = True
-        if status in ("found", "timeout") or link.error() is not None:
+        if status in ("found", "timeout") or link.color() is not None or link.error() is not None:
             return
         time.sleep(poll_interval)
 
@@ -684,8 +733,12 @@ def run(username, password):
     the server knows whether there is an opponent at all, so this waits on
     _wait_for_matchmaking_outcome instead of the ordinary
     _wait_for_assignment_or_error until the search itself resolves --
-    "found" falls through into that same ordinary wait for `assigned`;
-    "timeout" shows a message box (client/roomdialog.py's
+    "found" falls through into that same ordinary wait for `assigned`, and
+    so does a direct reconnect to a held seat (Step 12: a returning player
+    is seated straight away, with no "found" ever sent, since nothing was
+    actually searched for -- see _wait_for_matchmaking_outcome's own
+    docstring for why waiting on `color()` too is what makes that not
+    hang forever); "timeout" shows a message box (client/roomdialog.py's
     show_no_opponent_found, slide 5's own requirement) and exits, the same
     way any other refusal does, just via a window instead of the
     terminal."""
@@ -696,7 +749,7 @@ def run(username, password):
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
     _log.info("client starting")
-    controller, renderer, link, bus, clock, banner, countdown_overlay, panel, sound_player = \
+    controller, renderer, link, bus, banner, countdown_overlay, panel, sound_player = \
         build_client(username=username, password=password)
     link.start()
     _wait_for_login_error(link)
@@ -713,10 +766,11 @@ def run(username, password):
         if link.matchmaking_status() == "timeout":
             show_no_opponent_found()
             return
-        # "found": the server already sent `assigned` right after
-        # matchmaking("found") -- see _wait_for_matchmaking_outcome's own
-        # docstring -- so falling through into the ordinary wait below
-        # picks it up with no special case of its own.
+        # Either "found" (a real match) or a direct reconnect to a held
+        # seat (Step 12, no "found" ever sent) -- the server already sent
+        # `assigned` either way, see _wait_for_matchmaking_outcome's own
+        # docstring, so falling through into the ordinary wait below picks
+        # it up with no special case of its own.
     _wait_for_assignment_or_error(link)
     if link.error() is not None:
         print(f"Connection refused by server: {link.error()}")
@@ -751,13 +805,14 @@ def run(username, password):
             # into the snapshot the server actually sent.
             snapshot = snapshot._replace(selected_cell=controller.selection)
             elapsed_ms = int((time.time() - start_time) * 1000)
-            clock["elapsed_ms"] = elapsed_ms
-            bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts: score,
-            #   move log, sound and the start banner all subscribe in
+            bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts: move
+            #   log, sound and the start banner all subscribe in
             #   build_client. Adding a future subscriber never touches this
             #   loop -- that is the whole justification for routing these
-            #   through a bus. (The end banner's text is decided below
-            #   instead -- see build_client's own comment on why.)
+            #   through a bus. (Score/log now come from the server's own
+            #   `history` message, not from a subscriber here -- see
+            #   PanelOverlay/build_client's own comment on why. The end
+            #   banner's text is decided below too, for the same reason.)
             if snapshot.game_over:
                 if not game_over_reported:
                     result = link.result()
