@@ -62,8 +62,10 @@ COUNTDOWN = "countdown"
 GAME_OVER = "game_over"
 MATCHMAKING = "matchmaking"
 HISTORY = "history"
+RATING = "rating"
 ROOM = "room"
 ERROR = "error"
+WAITING = "waiting"
 
 # Colors are "w" / "b" -- the same spelling Config and PieceView already
 # use. Do not introduce "white" / "black" anywhere.
@@ -82,8 +84,10 @@ _REQUIRED_FIELDS = {
     GAME_OVER: ("winner", "winner_username"),
     MATCHMAKING: ("status",),
     HISTORY: ("white_name", "black_name", "white_score", "black_score", "log"),
+    RATING: ("rating",),
     ROOM: ("id",),
     ERROR: ("reason",),
+    WAITING: ("waiting",),
 }
 
 # type -> subset of its required fields that must be a [row, col] cell.
@@ -240,6 +244,12 @@ def countdown(seconds):
 
 
 def game_over(winner, winner_username=None, rating=None):
+    # pylint: disable=redefined-outer-name
+    # `rating` here is this function's own, unrelated parameter (a
+    # {"you":..., "delta":...} dict, see its own docstring below) -- it
+    # only shares a name with the module-level rating() builder added
+    # later (Step 12, a single ELO number), never calls or is called by
+    # it.
     """`winner` is `"w"`, `"b"`, or `None` -- there is no draw: an inconclusive
     game (e.g. both players disconnected, slide 5.2) reports `None`, per
     Server_Design.md's rule that it is not scored as one either.
@@ -325,6 +335,18 @@ def decode_capture_log(data):
         raise ProtocolError(ProtocolError.BAD_PAYLOAD) from exc
 
 
+def rating(value):
+    """`value` is this connection's OWN current ELO rating (common.elo),
+    shown in the home dialog (Step 12, slide 3) so the player can see who
+    they are and, on a later game, that it changed. Sent once, right
+    after a successful login, and again -- unsolicited, the same
+    server-push house style every other message here already uses --
+    whenever a game this connection was seated in ends decisively and
+    updates it (see server.py's _tick_loop); there is no request message
+    for this, only the push."""
+    return {"type": RATING, "rating": value}
+
+
 def room(room_id):
     """`room_id` is the room's id, sent in reply to `room_create` or `room_join`.
     It doubles as the room's name and is written at the top of the client's screen
@@ -337,6 +359,20 @@ def error(reason):
     machine-readable code (unlike `ProtocolError.code`). It is meant for logging or
     display, not for the receiver to branch on."""
     return {"type": ERROR, "reason": reason}
+
+
+def waiting(is_waiting):
+    """`is_waiting` is whether this game currently has an empty "w" or "b"
+    seat (common.registry.GameRegistry.both_seated) -- fixed by live
+    testing: a solo player could otherwise walk a piece across an
+    unopposed board and capture the empty side's king for a free,
+    repeatable win, with the board simply looking frozen rather than
+    explaining why nothing else was happening. Sent whenever this value
+    CHANGES (see server.py's _tick_loop) -- unsolicited, the same
+    server-push house style every other message here already uses -- so
+    a client can show "Waiting for an opponent" for exactly as long as it
+    is actually true, and nothing once an opponent has joined."""
+    return {"type": WAITING, "waiting": is_waiting}
 
 
 # --- snapshot conversion -----------------------------------------------------

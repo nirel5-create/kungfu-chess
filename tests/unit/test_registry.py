@@ -509,3 +509,46 @@ def test_has_connected_players_is_false_once_everyone_has_left():
 def test_has_connected_players_is_false_for_an_unknown_game():
     registry = GameRegistry(_FakeSession)
     assert registry.has_connected_players("no-such-game") is False
+
+
+# --- both_seated (live-testing fix: no game runs with only one player) -----
+
+def test_both_seated_is_false_for_an_unknown_game():
+    registry = GameRegistry(_FakeSession)
+    assert registry.both_seated("no-such-game") is False
+
+
+def test_both_seated_is_false_with_only_one_player_joined():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    assert registry.both_seated(game_id) is False
+
+
+def test_both_seated_is_true_once_w_and_b_are_both_taken():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    assert registry.both_seated(game_id) is True
+
+
+def test_both_seated_ignores_a_third_viewer():
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.join(game_id, "carol")  # viewer
+    assert registry.both_seated(game_id) is True
+
+
+def test_both_seated_stays_true_after_one_player_disconnects():
+    # Seats are sticky: a game that has genuinely started must not go
+    # back to "waiting" just because someone stepped away -- that is the
+    # disconnect countdown's job (slide 5.2), not this check's.
+    registry = GameRegistry(_FakeSession)
+    game_id = registry.create()
+    registry.join(game_id, "alice")
+    registry.join(game_id, "bob")
+    registry.leave(game_id, "alice")
+    assert registry.both_seated(game_id) is True

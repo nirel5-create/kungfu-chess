@@ -24,13 +24,28 @@ now lives on the server, inside the snapshot itself -- so this uses a plain
 wall-clock stopwatch (time.time() since the window opened) for animation
 timing only; it is cosmetic and never used to advance the game.
 
-Before the window opens, this prompts for a username on the terminal (slide
-3: "Login with username -- do it in a shell, not via GUI") and sends it to
-the server as the very first message on the connection, so the server can
-log which username took which color. There is no password and no
-persistence: this is presentation only (slide 3); the account system is a
-later step. Which color this client is assigned is decided by the server
-from connection order, not from anything this file sends or asserts.
+Before the window opens, this prompts for a username and password on the
+terminal (slide 3/4: "Login with username -- do it in a shell, not via
+GUI") and sends them to the server as the very first message on the
+connection. Which color a client is assigned is decided by the server
+from join order, not from anything this file sends or asserts.
+
+Step 12 (slide 3) turns run() from a straight line -- prompt, dialog, play,
+exit -- into a loop: _login() retries on a refusal instead of exiting the
+process, and once logged in, one _ServerLink is kept open and reused for
+every game that connection ever plays: ask_room() (now the project's Home
+screen, showing the logged-in username and rating) is shown again after
+each game ends, and its next choice is sent on the SAME connection, never
+a fresh one -- closing and reopening between games would make the
+username look like a duplicate connection to the server's own check (Step
+11); see server.py's own module docstring for the matching server-side
+restructuring. client/homescreen.py's HomeFlow tracks which of the four
+screens (LOGIN/HOME/PLAYING/QUIT) the player is on; this file is the
+window/socket plumbing that drives it. Only the OpenCV window itself is
+torn down and rebuilt between games (_play_one_game), not the connection
+-- see build_client, which now takes an already-connected link and an
+already-existing SoundPlayer instead of building either itself, so mute
+state also survives across games the same way the connection does.
 
 Move log, sound and the start banner are wired through one common.bus.Bus
 (Step 6): build_client subscribes client.events.GameEventSource,
@@ -56,6 +71,15 @@ outcome, rather than through the bus.
 
 Run with:  python client.py
 """
+# pylint: disable=too-many-lines
+# Step 12 (slide 3) grew this file past the threshold with the home
+# screen's own plumbing: a login retry loop, a persistent-connection
+# HOME/PLAYING loop, and the mute button's draw/hit-test wiring, each
+# already broken into its own small function -- the same reasoning
+# server.py's own module-level disable gives for its own Step-by-Step
+# growth. Splitting this module itself is a reasonable future cleanup,
+# but is not part of implementing any single step, so it is not done
+# here.
 
 import asyncio
 import getpass
@@ -68,10 +92,15 @@ import cv2
 import numpy as np
 import websockets
 
+from client import mute_button
 from client.events import GameEventSource
+from client.homescreen import HomeFlow, QUIT
 from client.overlay import BannerOverlay, CountdownOverlay
 from client.panel_overlay import PanelOverlay
-from client.roomdialog import CREATE, JOIN, PLAY, ask_room, show_no_opponent_found
+from client.roomdialog import (
+    CREATE, JOIN, PLAY, ask_room, shutdown as shutdown_dialogs,
+    show_matchmaking_progress, show_no_opponent_found,
+)
 from client.sound import SoundPlayer
 from common import net, protocol, topics
 from common.bus import Bus
@@ -151,6 +180,8 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._result = None  # (winner, winner_username) once `game_over` arrives -- see result()
         self._matchmaking_status = None  # "searching"/"found"/"timeout" -- see matchmaking_status()
         self._history = None  # _History once a `history` message arrives -- see history()
+        self._rating = None  # None until a `rating` message arrives -- see rating()
+        self._waiting = False  # None-equivalent: no `waiting` has arrived yet -- see waiting()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -254,6 +285,63 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         with self._lock:
             return self._history
 
+    def rating(self):
+        """-> this connection's own current ELO rating from the server's
+        latest `rating` message (Step 12, slide 3), or None before the
+        first one has arrived. The server sends this once right after a
+        successful login and again, unsolicited, whenever a game this
+        connection was part of ends decisively (see server.py's
+        _tick_loop), so this reflects the true current rating for the
+        whole session -- shown in the home dialog every time it reopens,
+        including after the very game that just changed it -- not just a
+        value fetched once at login."""
+        with self._lock:
+            return self._rating
+
+    def waiting(self):
+        """-> whether this game currently has an empty "w" or "b" seat,
+        from the server's latest `waiting` message -- False before one
+        has ever arrived, matching a fresh game where nobody would show
+        this text yet anyway. Fixed by live testing: a solo player could
+        otherwise walk a piece across an unopposed board and capture the
+        other side's undefended king for a free, repeatable win, with the
+        board simply looking frozen rather than explaining why (see
+        server.py's own module docstring). The server sends this only
+        when the value CHANGES, so this reflects whichever state was most
+        recently true, not necessarily "just now"."""
+        with self._lock:
+            return self._waiting
+
+    def reset_for_new_round(self):
+        """Clear every OTHER per-round field back to its fresh-connection
+        value: `snapshot`, `color`, `room`, `error`, the countdown pair,
+        `result`, `matchmaking_status`, and `waiting`. Called by run()
+        right before sending a new room choice on this SAME, still-open
+        connection (Step 12), so a value left over from the game that
+        just ended -- a stale snapshot, an old result, a countdown, a
+        leftover "waiting for an opponent" -- cannot flash on screen or
+        be mistaken for this round's own before the server's first new
+        message for it arrives.
+
+        Does NOT touch identity (uri, username, password), the asyncio
+        thread/loop/websocket (all still alive and still needed -- this
+        connection is being reused, not rebuilt), `history` (PanelOverlay
+        reads it every frame regardless of game state, and the server
+        will send a fresh one anyway, the same as every other field it
+        drives), or `rating` (the home dialog shows it across rounds, and
+        a round that never ends decisively sends no fresh one to replace
+        it with)."""
+        with self._lock:
+            self._snapshot = None
+            self._color = None
+            self._room = None
+            self._error = None
+            self._countdown_seconds = None
+            self._countdown_updated_at = None
+            self._result = None
+            self._matchmaking_status = None
+            self._waiting = False
+
     def send(self, message):
         """Called from the OpenCV thread. Schedules the send on the network
         thread's loop and returns immediately; silently drops the message if
@@ -271,6 +359,12 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
         self._loop.run_until_complete(self._receive_loop())
 
     async def _receive_loop(self):
+        # pylint: disable=too-many-statements
+        # One elif per message type (STATE/ASSIGNED/ROOM/ERROR/COUNTDOWN/
+        # GAME_OVER/MATCHMAKING/HISTORY/RATING/WAITING), each a couple of
+        # linear lines under the same lock -- splitting this into ten
+        # named handlers would just move the same lines behind ten more
+        # names, not reduce what this loop is responsible for decoding.
         async with websockets.connect(self._uri) as websocket:
             self._websocket = websocket
             _log.info("connected to %s", self._uri)
@@ -333,6 +427,14 @@ class _ServerLink:  # pragma: no cover, pylint: disable=too-many-instance-attrib
                             white_score=message["white_score"], black_score=message["black_score"],
                             log=log)
                     _log.info("history: %d entries", len(log))
+                elif message["type"] == protocol.RATING:
+                    with self._lock:
+                        self._rating = message["rating"]
+                    _log.info("rating: %d", message["rating"])
+                elif message["type"] == protocol.WAITING:
+                    with self._lock:
+                        self._waiting = message["waiting"]
+                    _log.info("waiting: %s", message["waiting"])
             _log.info("disconnected from %s", self._uri)
 
 
@@ -425,12 +527,24 @@ _PANEL_WIDTH = 280  # extra canvas width for ScorePanel's text and the mute
 #                     frames (see the manual verification for this fix).
 _PANEL_LINE_H = 26  # matches view.score_panel's own _LINE_H (frozen,
 #                     private to that module, so restated here rather than
-#                     imported) -- gives the mute/room indicator lines
-#                     above ScorePanel's own content the same rhythm, and
-#                     is what keeps them from overlapping it or each other.
-_PANEL_TOP = 15  # y of the first line in the panel strip (mute); room and
-#                  ScorePanel each take the next _PANEL_LINE_H-sized slot
-#                  below it -- see build_client and the draw loop.
+#                     imported) -- the ordinary line rhythm for every
+#                     plain-text line below the mute button's own slot
+#                     (room, then ScorePanel's own content), and what
+#                     keeps them from overlapping each other.
+_PANEL_TOP = 30  # y (text baseline) of the mute button's own line -- tall
+#                  enough that its padded border box (client/mute_button.
+#                  rect: _TEXT_HEIGHT + 2*_PADDING = 32px above this
+#                  baseline) fits entirely on the canvas instead of
+#                  running off the top edge (live-testing fix: it used to
+#                  start at 15, which clipped the box's own top).
+_MUTE_SLOT_H = 40  # the mute button's own padded slot height -- bigger
+#                    than a plain text line's _PANEL_LINE_H, since a
+#                    bordered button needs padding on every side, not
+#                    just room for one line of text (live-testing fix:
+#                    the room line used to sit right at _PANEL_LINE_H
+#                    below the button, cramped against its padded box).
+#                    The room line, and everything after it, resumes the
+#                    panel's ordinary _PANEL_LINE_H rhythm from here on.
 
 
 def _widen_canvas(frame, extra_width):  # pragma: no cover
@@ -451,9 +565,32 @@ def _widen_canvas(frame, extra_width):  # pragma: no cover
     return widened
 
 
-def _draw_mute_indicator(frame, muted, x, y):  # pragma: no cover
+def _draw_mute_indicator(frame, muted, button_rect, pressed, x, y):  # pragma: no cover
+                          # pylint: disable=too-many-arguments, too-many-positional-arguments
+                          # pylint: disable=no-member
+    # Five independent pieces this one small draw needs (mute state, the
+    # button's own geometry and press state, and where to draw) -- the
+    # same reasoning other disables in this file give. cv2.rectangle is a
+    # compiled C extension member pylint cannot introspect -- see
+    # _play_one_game's own disable for the same false positive.
     """Show whether sound is on or off, and the key that toggles it -- 'm'
-    is otherwise undiscoverable."""
+    is otherwise undiscoverable. Also draws `button_rect` (client/
+    mute_button.rect) as a visible bordered box, with a brief highlighted
+    fill while `pressed` (client/mute_button.is_pressed) is True -- fixed
+    by live testing: the control worked when clicked but looked like
+    plain status text, with nothing to suggest it was clickable at all.
+
+    The rectangle is drawn straight onto frame.img with cv2.rectangle,
+    the same pattern client.py's own _widen_canvas and client/overlay.
+    py's _draw_with_backing already use for the same reason: Img (frozen)
+    exposes no rectangle primitive of its own."""
+    left, top, right, bottom = button_rect
+    channels = frame.img.shape[2]
+    white = (255, 255, 255, 255) if channels == 4 else (255, 255, 255)
+    if pressed:
+        highlight = (90, 90, 90, 255) if channels == 4 else (90, 90, 90)
+        cv2.rectangle(frame.img, (left, top), (right, bottom), highlight, thickness=-1)
+    cv2.rectangle(frame.img, (left, top), (right, bottom), white, thickness=1)
     text = "Sound: OFF (m)" if muted else "Sound: ON (m)"
     frame.put_text(text, x, y, 0.6, color=(255, 255, 255, 255))
 
@@ -468,16 +605,25 @@ def _draw_room_indicator(frame, room_id, x, y):  # pragma: no cover
     frame.put_text(f"Room: {room_id}", x, y, 0.6, color=(255, 255, 255, 255))
 
 
-def _prompt_username():  # pragma: no cover
-    """Read a non-empty username from the terminal, before the window opens
-    (slide 3: login in a shell, not the GUI). Empty input (just pressing
-    Enter) re-prompts rather than being sent -- there is no server-side
-    validation of usernames beyond the field simply being present, so this
-    is the only check there is."""
-    while True:
-        username = input("Username: ").strip()
-        if username:
-            return username
+def _prompt_username(mention_quit=False):  # pragma: no cover
+    """Read a username from the terminal, before the window opens (slide
+    3: login in a shell, not the GUI). -> the typed text, stripped --
+    including "" (a blank Enter) or "q" unchanged, rather than re-
+    prompting on either the way this used to: Step 12's _login retry
+    loop treats both as "quit", and re-prompting here out from under it
+    would make that way out silently not work. Any other value is a
+    candidate username, with no further validation here -- there is no
+    server-side check beyond the field simply being present, so this is
+    the only check there ever was.
+
+    `mention_quit` -- True only for the first prompt of a login attempt
+    (live-testing fix): the way out is real on every attempt, but saying
+    so again after every single refusal turned one clear line into a
+    reprinted paragraph -- see _login()'s own docstring. Stating it once,
+    up front, is enough for a player to remember it for the rest of the
+    retry loop."""
+    prompt = 'Username (blank or "q" to quit): ' if mention_quit else "Username: "
+    return input(prompt).strip()
 
 
 def _prompt_password():  # pragma: no cover
@@ -505,21 +651,78 @@ def _client_log_path(username):  # pragma: no cover
     return f"{_LOG_DIR}/client_{sanitize_for_filename(username)}.log"
 
 
-def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no cover, pylint: disable=too-many-locals
+def _login():  # pragma: no cover
+    """Prompt for username/password, retrying on a server refusal instead
+    of exiting the process (Step 12: "no way to correct a typed username
+    or password -- the only escape is Ctrl-C"). A fresh _ServerLink is
+    built and started for every attempt -- safe, since a refused login
+    never reserved anything server-side (server.py's _reserve_username is
+    only ever touched after a successful _authenticate), unlike reusing a
+    connection ACROSS GAMES once one has already succeeded, which is what
+    the rest of this file is careful not to do (see this module's own
+    docstring).
+
+    -> (flow, link), with `flow` already logged_in() and `link` already
+    started, once a login succeeds. -> (flow, None) if the player quit
+    instead (see _prompt_username's own docstring for the two ways to)
+    -- `flow` stays at its own fresh starting state (LOGIN), with nothing
+    more for the caller to do.
+
+    Per-client file logging is configured only once, here, right after a
+    login actually succeeds -- not per attempt, so a string of failed
+    attempts before the real one does not scatter log lines across
+    several files, or worse, build one from a rejected, possibly-bogus
+    username.
+
+    A refusal prints just the reason (e.g. "Login refused: bad_password")
+    -- live testing found the original message ("...Try again, or leave
+    the username blank (or type "q") to quit.") read as a paragraph
+    reprinted after every failed attempt; the way out is stated once, in
+    the very first username prompt (_prompt_username's own
+    mention_quit), which is enough to remember for the rest of the
+    loop."""
+    flow = HomeFlow()
+    first_attempt = True
+    while True:
+        username = _prompt_username(mention_quit=first_attempt)
+        first_attempt = False
+        if not username or username.lower() == "q":
+            return flow, None
+        password = _prompt_password()
+        link = _ServerLink(_SERVER_URI, username, password)
+        link.start()
+        _wait_for_login_error(link)
+        if link.error() is None:
+            add_file_logging(_client_log_path(username))
+            flow.logged_in(username)
+            return flow, link
+        print(f"Login refused: {link.error()}")
+        flow.login_refused(link.error())
+
+
+def build_client(link, sound_player):  # pragma: no cover, pylint: disable=too-many-locals
     # This is the composition root: the one place that wires every
     # collaborator together, mirroring app.py's build_game(). The local
     # count reflects how many independent parts there are to wire, not
     # tangled logic -- splitting it up would just move names around, not
     # reduce what this function is responsible for building.
-    """Compose the whole graphical stack and return the parts run() drives.
-    Mirrors app.py's build_game(), except the engine is a ClientProxy, the
-    board is a _SnapshotBoard instead of a model.Board, there is a
-    ServerLink instead of a GameClock, and score/log/sound/banner are wired
-    through one Bus instead of being called directly.
+    """Compose the graphical stack for ONE game and return the parts
+    _play_one_game drives. Mirrors app.py's build_game(), except the
+    engine is a ClientProxy, the board is a _SnapshotBoard instead of a
+    model.Board, there is a ServerLink instead of a GameClock, and
+    score/log/sound/banner are wired through one Bus instead of being
+    called directly.
 
-    password -- passed straight through to _ServerLink; see its
-    docstring."""
-    link = _ServerLink(uri, username, password)
+    `link` and `sound_player` are built ONCE by run(), not here (Step 12):
+    both must survive from game to game on the same connection -- link
+    because reopening one per game would look like a duplicate login to
+    the server's own check (Step 11), sound_player because muting should
+    stay muted across games, not reset back to on. Everything else
+    returned here (controller, renderer, bus, banner, countdown_overlay,
+    panel) is rebuilt fresh every game instead: simpler than auditing each
+    one for cross-game state (e.g. Controller.selection potentially
+    showing a stale highlight) at negligible cost, since none of them
+    owns anything that needs to outlive one game."""
     board = _SnapshotBoard(link)
     proxy = net.ClientProxy(link.send)
     controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
@@ -532,8 +735,8 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     renderer = Renderer(sprites, lambda p: Img().read(p), _BOARD_PNG,
                         animation=animations.frame)
 
-    # Two _PANEL_LINE_H slots below _PANEL_TOP -- the mute and room
-    # indicators (see the draw loop) each take one of the slots above this,
+    # The mute button's own _MUTE_SLOT_H below _PANEL_TOP, then one
+    # ordinary _PANEL_LINE_H for the room indicator (see the draw loop),
     # so ScorePanel's own content starts right after both instead of
     # overlapping them (room used to be drawn on top of ScorePanel's first
     # line -- a bug found by testing Step 7).
@@ -544,7 +747,8 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # same history -- including one that joined mid-game, which a
     # client-side GameObserver (computing its own log from only what it
     # happened to see) could never do.
-    panel = ScorePanel(PanelOverlay(link), x=image_w + 20, y=_PANEL_TOP + 2 * _PANEL_LINE_H)
+    panel = ScorePanel(PanelOverlay(link), x=image_w + 20,
+                        y=_PANEL_TOP + _MUTE_SLOT_H + _PANEL_LINE_H)
     banner = BannerOverlay()
     # Not wired to the bus like banner above: its number comes straight from
     # link.countdown() every frame in run()'s loop (see CountdownOverlay's
@@ -552,7 +756,6 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # a subscriber), not from anything the server-driven SNAPSHOT/GAME_END
     # topics carry.
     countdown_overlay = CountdownOverlay()
-    sound_player = SoundPlayer(_SOUNDS)
     bus = Bus()
     # promotions is passed explicitly, the same way server.py passes
     # king_type=_CONFIG.king_type to GameRegistry instead of relying on its
@@ -573,7 +776,7 @@ def build_client(uri=_SERVER_URI, username="player", password=""):  # pragma: no
     # -- see run() for why it waits rather than reading link.result() from
     # inside this bus callback.
 
-    return controller, renderer, link, bus, banner, countdown_overlay, panel, sound_player
+    return controller, renderer, bus, banner, countdown_overlay, panel
 
 
 def _wait_for_login_error(link, timeout_s=2.0, poll_interval=0.02):  # pragma: no cover
@@ -629,46 +832,6 @@ def _wait_for_assignment_or_error(link, poll_interval=0.02):  # pragma: no cover
         time.sleep(poll_interval)
 
 
-def _wait_for_matchmaking_outcome(link, poll_interval=0.02):  # pragma: no cover
-    """Block until Play's search (slide 5.1) resolves: matchmaking_status()
-    becomes "found" or "timeout", a seat arrives directly (color() becomes
-    non-None -- see below for why that is its own, equally valid way out),
-    or a refusal (error()) arrives. Prints once, the moment "searching" is
-    first seen, so the player is not left staring at nothing for up to the
-    minute the search is allowed to run (see protocol.matchmaking's own
-    docstring for the three states) -- printed here, not in run(), so the
-    "only once" bookkeeping stays local to the one place that needs it.
-
-    Only called when run() sent protocol.play() -- see its own docstring
-    for why a Room/default-game connection never needs this at all.
-
-    A returning player whose held seat is still theirs (Step 12) skips
-    matchmaking entirely server-side: _handle_client sends `assigned`
-    straight away, with no `matchmaking` message at all -- not "found",
-    not even "searching", since nothing was actually searched for. Waiting
-    only for matchmaking_status() to change would then wait forever, since
-    it would stay None; color() becoming non-None is what actually signals
-    a seat has arrived either way, "found" or a direct reconnect, so it is
-    checked here directly rather than assuming `found` always precedes it.
-    That is also why "Searching for an opponent" never gets printed for a
-    reconnect: this loop exits before `status` is ever "searching", because
-    it was never sent.
-
-    Either way, the caller (run()) falls through into the ordinary
-    _wait_for_assignment_or_error above once this returns, which is a
-    no-op if color() is already set -- there is no second case to handle
-    for "found" specifically versus a direct reconnect; both just mean
-    "a seat has arrived", which is exactly what that function already
-    waits for."""
-    printed_searching = False
-    while True:
-        status = link.matchmaking_status()
-        if not printed_searching and status == "searching":
-            print("Searching for an opponent (up to 1 minute)...")
-            printed_searching = True
-        if status in ("found", "timeout") or link.color() is not None or link.error() is not None:
-            return
-        time.sleep(poll_interval)
 
 
 def _room_message_from_dialog(action, room_name):  # pragma: no cover
@@ -684,217 +847,283 @@ def _room_message_from_dialog(action, room_name):  # pragma: no cover
     return protocol.play()
 
 
-def run(username, password):
+def _play_one_game(controller, renderer, link, bus, banner, countdown_overlay,
+                    panel, sound_player):
     # pragma: no cover
     # pylint: disable=too-many-locals, too-many-statements, too-many-branches
-    # Local count grew past the threshold with the Room dialog's two
-    # extra names (dialog_action, room_name) on top of what build_client
-    # already returns -- one frame loop genuinely touches this many
-    # independent parts; splitting it up would just move names around,
-    # the same reasoning build_client's own disable above gives. Statement
-    # and branch counts grew the same way with the winner-banner and
-    # reconnect-message triggers, and Play's own three-way outcome, below:
-    # each is a few linear lines read once per frame or once per run,
-    # not separable logic, so splitting them into their own functions
-    # would just add call overhead and more names to thread the same
-    # loop-local state (elapsed_ms, snapshot, link) through.
-    """Wait for the server to verify login, THEN show the Room dialog
-    (slide 6) and send its outcome, wait again for the server to seat
-    this connection or refuse it, then open the window and run the frame
-    loop until Esc/Q is pressed. Each frame draws whatever snapshot the
-    network thread last received; nothing is drawn before the first one.
-
-    `username`/`password` are already known by the time this is called --
-    __main__ prompts for both first (slide 3/4: login in a shell, not the
-    GUI) and configures per-client file logging from the username (see
-    _client_log_path) before run() does anything else, so every line this
-    function and everything it builds logs lands in that client's own
-    file from the very first one.
-
-    Login is checked BEFORE the Room dialog is shown, not after: a manual
-    test typed a wrong password, filled in the whole Create/Join/Play
-    dialog, and only then saw "bad_password" -- wasted effort on a dialog
-    that was never going to matter. _wait_for_login_error catches that
-    (and any other login-time refusal) first; only once it finds none
-    does the dialog open at all, and the dialog's outcome becomes the
-    connection's second message, exactly where Room already expected it
-    (see server.py's _read_room_choice) -- just sent later than it used
-    to be, once a human has actually finished answering it, rather than
-    automatically the instant the socket opened.
-
-    A refusal (e.g. AlreadyConnectedError, "bad_password", "room_exists",
-    or "no_such_room" on the server) is reported on the terminal and ends
-    the program before any window opens -- there would be nothing for
-    that window to do, since the server never seats it, so opening one
-    would just show an empty board no click can ever affect.
-
-    Play (slide 5.1) is a fourth outcome of the dialog, not a refusal: it
-    can take up to a minute (common.matchmaker.SEARCH_TIMEOUT_MS) before
-    the server knows whether there is an opponent at all, so this waits on
-    _wait_for_matchmaking_outcome instead of the ordinary
-    _wait_for_assignment_or_error until the search itself resolves --
-    "found" falls through into that same ordinary wait for `assigned`, and
-    so does a direct reconnect to a held seat (Step 12: a returning player
-    is seated straight away, with no "found" ever sent, since nothing was
-    actually searched for -- see _wait_for_matchmaking_outcome's own
-    docstring for why waiting on `color()` too is what makes that not
-    hang forever); "timeout" shows a message box (client/roomdialog.py's
-    show_no_opponent_found, slide 5's own requirement) and exits, the same
-    way any other refusal does, just via a window instead of the
-    terminal."""
+    # pylint: disable=too-many-arguments, too-many-positional-arguments
+    # pylint: disable=too-many-nested-blocks
+    # One frame loop genuinely touches this many independent parts --
+    # splitting it up would just move names around, the same reasoning
+    # build_client's own disable gives. Statement and branch counts grew
+    # the same way with the winner-banner and reconnect-message triggers,
+    # the mute button's hit test, and the two ways this can end, below:
+    # each is a few linear lines read once per frame, not separable
+    # logic, so splitting them into their own functions would just add
+    # call overhead and more names to thread the same loop-local state
+    # (elapsed_ms, snapshot, mute_rect) through. The eight parameters are
+    # exactly what build_client just returned plus link/sound_player --
+    # one call one frame later, not a designed-in pile of unrelated
+    # state. The nested-block count is `while: if snapshot: if game_over:
+    # if not reported: if result:` -- each level narrows a real
+    # precondition the level above it does not already rule out (a
+    # snapshot to read, a game that has ended, a banner not yet queued, a
+    # result actually arrived), not one flattenable decision spread
+    # across several ifs.
     # cv2 is a compiled C extension, so pylint cannot introspect its
     # members: EVENT_LBUTTONDOWN, namedWindow, imshow, and the rest below
     # all exist and work at runtime (app.py, frozen and untouched, uses the
     # same members the same way). Every no-member warning from here to the
     # end of this function is that false positive, not a real one.
     # pylint: disable=no-member
-    _log.info("client starting")
-    controller, renderer, link, bus, banner, countdown_overlay, panel, sound_player = \
-        build_client(username=username, password=password)
-    link.start()
-    _wait_for_login_error(link)
-    if link.error() is not None:
-        print(f"Connection refused by server: {link.error()}")
-        return
-    dialog_action, room_name = ask_room()
-    link.send(_room_message_from_dialog(dialog_action, room_name))
-    if dialog_action == PLAY:
-        _wait_for_matchmaking_outcome(link)
-        if link.error() is not None:
-            print(f"Connection refused by server: {link.error()}")
-            return
-        if link.matchmaking_status() == "timeout":
-            show_no_opponent_found()
-            return
-        # Either "found" (a real match) or a direct reconnect to a held
-        # seat (Step 12, no "found" ever sent) -- the server already sent
-        # `assigned` either way, see _wait_for_matchmaking_outcome's own
-        # docstring, so falling through into the ordinary wait below picks
-        # it up with no special case of its own.
-    _wait_for_assignment_or_error(link)
-    if link.error() is not None:
-        print(f"Connection refused by server: {link.error()}")
-        return
-    start_time = time.time()
-    game_over_reported = False  # -> whether banner.show_result has fired
-    #   for the current game yet -- see the draw loop for why this is
-    #   checked every frame rather than fired once on a bus event.
-    previous_countdown_seconds = None  # -> link.countdown() as of the last
-    #   frame, for detecting the one transition (live -> cleared, game
-    #   still in progress) that actually means the opponent reconnected --
-    #   see the draw loop.
+    """Open the window and run one game's frame loop, from the first
+    snapshot until either the player quits outright or the game ends
+    naturally and its banner has finished showing. Each frame draws
+    whatever snapshot the network thread last received; nothing is drawn
+    before the first one.
 
+    -> True if the player quit outright: Esc, Q, or the window's own
+    close button -- run() ends the whole client either way, same as
+    before Step 12. -> False once a game ended naturally (snapshot.
+    game_over, the server's own `game_over` message named a result) AND
+    `banner` has finished showing it: the final position, the winner
+    banner and the game-over sound all still need the window to keep
+    drawing (and playing) for a moment to be seen and heard at all, so
+    this does not return the instant the king falls -- it reuses
+    BannerOverlay's own existing `showing` timing to know when that
+    moment has passed, rather than a new bespoke timer. Either way, this
+    function always closes the window itself before returning, so run()
+    can show the home dialog again with nothing left over from this
+    game's window."""
     def on_mouse(event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            rect = mute_rect_holder["rect"]
+            if rect is not None and mute_button.is_hit(x, y, rect):
+                sound_player.toggle_mute()
+                mute_pressed_holder["at_ms"] = int((time.time() - start_time) * 1000)
+                return
             controller.click(x, y)
         elif event == cv2.EVENT_RBUTTONDOWN:
             controller.jump(x, y)
 
+    # Populated on the first frame drawn below, once panel_x is known --
+    # a click before that can only be a miss, since nothing is on screen
+    # yet to hit. Plain dicts, not bare outer-scope variables: on_mouse
+    # only reads/writes through these, never rebinds the names
+    # themselves, so a bare variable would need `nonlocal` for no benefit
+    # over a mutable container both closures already share by reference.
+    mute_rect_holder = {"rect": None}
+    mute_pressed_holder = {"at_ms": None}  # live-testing fix: elapsed_ms
+    #   of the last click/keypress that toggled mute, or None before the
+    #   first one this game -- see client/mute_button.is_pressed.
+
     cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(_WINDOW, on_mouse)
 
-    while True:
-        snapshot = link.snapshot()
-        if snapshot is not None:
-            # Selection is client-side view state, not game state: it is
-            # this window's own idea of what is clicked, not something the
-            # game rules care about. The server never sees or broadcasts it
-            # -- if it did, every client would see the opponent's selection,
-            # and the server would end up tracking per-client UI state it has
-            # no business owning. So it is stitched in here, after the fact,
-            # into the snapshot the server actually sent.
-            snapshot = snapshot._replace(selected_cell=controller.selection)
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts: move
-            #   log, sound and the start banner all subscribe in
-            #   build_client. Adding a future subscriber never touches this
-            #   loop -- that is the whole justification for routing these
-            #   through a bus. (Score/log now come from the server's own
-            #   `history` message, not from a subscriber here -- see
-            #   PanelOverlay/build_client's own comment on why. The end
-            #   banner's text is decided below too, for the same reason.)
-            if snapshot.game_over:
-                if not game_over_reported:
-                    result = link.result()
-                    # None here means the server's `game_over` message has
-                    # not arrived yet -- see result()'s own docstring on why
-                    # that can lag `snapshot.game_over` by a frame or two.
-                    # Simply trying again next frame, rather than falling
-                    # back to a winner-less banner now, is what makes this
-                    # race harmless instead of an occasional wrong display.
-                    if result is not None:
-                        banner.show_result(*result)
-                        game_over_reported = True
-            else:
-                game_over_reported = False
-            countdown_seconds = link.countdown()
-            if (previous_countdown_seconds is not None and countdown_seconds is None
-                    and not snapshot.game_over):
-                # The only way a live countdown goes quiet without a
-                # `game_over` message following it: the opponent's away_ms
-                # was cleared by GameRegistry.join, i.e. they reconnected.
-                # If the game ended instead (auto-resign, slide 5.2),
-                # snapshot.game_over is already true by the time this ever
-                # goes quiet -- countdown()'s own staleness window is wider
-                # than one tick, so the game-over branch above always wins
-                # that race, never this one.
-                countdown_overlay.show_reconnected(elapsed_ms)
-            previous_countdown_seconds = countdown_seconds
-            frame = renderer.render(snapshot, elapsed_ms)
-            banner.draw(frame, elapsed_ms)  # centered on the true board size,
-            #   before the canvas is widened below -- see _widen_canvas.
-            countdown_overlay.draw(frame, countdown_seconds, elapsed_ms)  # same
-            #   reason: drawn over the true board, not the widened panel strip.
-            frame = _widen_canvas(frame, _PANEL_WIDTH)
-            panel.draw(frame)
-            panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20
-            _draw_mute_indicator(frame, sound_player.muted, panel_x, _PANEL_TOP)
-            _draw_room_indicator(frame, link.room(),
-                                  panel_x, _PANEL_TOP + _PANEL_LINE_H)
-            cv2.imshow(_WINDOW, frame.img)
-            # Deliberately no `if snapshot.game_over: break` here: the final
-            # position, the game-over banner and the game-over sound all
-            # need the window to keep drawing (and playing) to be seen and
-            # heard at all -- breaking here would close it the instant the
-            # king falls, before any of the three could register. The
-            # player closes the window with Esc/Q below, same as always;
-            # reopening the client simply joins a new game, since the
-            # server already removes a finished game after its linger
-            # period (common.registry.GAME_END_LINGER_MS) -- no extra code
-            # needed here for that.
-        key = cv2.waitKey(16) & 0xFF
-        # Compared case-insensitively: cv2.waitKey returns whatever code the
-        # OS reports for the physical key, which is upper-case while Caps
-        # Lock is on or Shift is held -- ord("q")/ord("m") alone then never
-        # match for the rest of the session, silently, with no error and no
-        # visible symptom beyond "the key does nothing" (Esc still quits,
-        # since 27 has no case, so this is easy to miss entirely).
-        if key in (27, ord("q"), ord("Q")):
-            break
-        if key in (ord("m"), ord("M")):
-            sound_player.toggle_mute()
-        # OpenCV does not treat the window's own close ("X") button as a
-        # key press -- cv2.waitKey above never sees it, so Esc/Q cannot
-        # catch it. WND_PROP_VISIBLE drops below 1 the moment the OS
-        # actually closes the window, which is the only signal there is
-        # for that click; checked every tick, right after waitKey has had
-        # its chance to pump that event.
-        if cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
-            break
+    start_time = time.time()
+    game_over_reported = False  # -> whether banner.show_result has fired
+    #   for this game yet -- see the draw loop for why this is checked
+    #   every frame rather than fired once on a bus event.
+    previous_countdown_seconds = None  # -> link.countdown() as of the last
+    #   frame, for detecting the one transition (live -> cleared, game
+    #   still in progress) that actually means the opponent reconnected --
+    #   see the draw loop.
+    quit_outright = True
+    try:
+        while True:
+            snapshot = link.snapshot()
+            if snapshot is not None:
+                # Selection is client-side view state, not game state: it is
+                # this window's own idea of what is clicked, not something
+                # the game rules care about. The server never sees or
+                # broadcasts it -- if it did, every client would see the
+                # opponent's selection, and the server would end up tracking
+                # per-client UI state it has no business owning. So it is
+                # stitched in here, after the fact, into the snapshot the
+                # server actually sent.
+                snapshot = snapshot._replace(selected_cell=controller.selection)
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                bus.publish(topics.SNAPSHOT, snapshot)   # everyone reacts:
+                #   move log, sound and the start banner all subscribe in
+                #   build_client. Adding a future subscriber never touches
+                #   this loop -- that is the whole justification for routing
+                #   these through a bus. (Score/log now come from the
+                #   server's own `history` message, not from a subscriber
+                #   here -- see PanelOverlay/build_client's own comment on
+                #   why. The end banner's text is decided below too, for the
+                #   same reason.)
+                if snapshot.game_over:
+                    if not game_over_reported:
+                        result = link.result()
+                        # None here means the server's `game_over` message
+                        # has not arrived yet -- see result()'s own
+                        # docstring on why that can lag snapshot.game_over
+                        # by a frame or two. Simply trying again next frame,
+                        # rather than falling back to a winner-less banner
+                        # now, is what makes this race harmless instead of
+                        # an occasional wrong display.
+                        if result is not None:
+                            banner.show_result(*result)
+                            game_over_reported = True
+                else:
+                    game_over_reported = False
+                countdown_seconds = link.countdown()
+                if (previous_countdown_seconds is not None and countdown_seconds is None
+                        and not snapshot.game_over):
+                    # The only way a live countdown goes quiet without a
+                    # `game_over` message following it: the opponent's
+                    # away_ms was cleared by GameRegistry.join, i.e. they
+                    # reconnected. If the game ended instead (auto-resign,
+                    # slide 5.2), snapshot.game_over is already true by the
+                    # time this ever goes quiet -- countdown()'s own
+                    # staleness window is wider than one tick, so the
+                    # game-over branch above always wins that race, never
+                    # this one.
+                    countdown_overlay.show_reconnected(elapsed_ms)
+                previous_countdown_seconds = countdown_seconds
+                frame = renderer.render(snapshot, elapsed_ms)
+                # Read once, before draw() consumes the same pending/expiry
+                # transition -- showing() is idempotent once already
+                # promoted this frame, so draw()'s own internal call below
+                # sees the identical text, just without needing its own
+                # return value plumbed back out here.
+                banner_text = banner.showing(elapsed_ms)
+                banner.draw(frame, elapsed_ms)  # centered on the true board
+                #   size, before the canvas is widened below -- see
+                #   _widen_canvas.
+                countdown_overlay.draw(frame, countdown_seconds, elapsed_ms,
+                                        waiting=link.waiting())  # same
+                #   reason: drawn over the true board, not the widened panel
+                #   strip.
+                frame = _widen_canvas(frame, _PANEL_WIDTH)
+                panel.draw(frame)
+                panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20
+                mute_rect = mute_button.rect(panel_x, _PANEL_TOP)
+                mute_rect_holder["rect"] = mute_rect
+                pressed = mute_button.is_pressed(elapsed_ms, mute_pressed_holder["at_ms"])
+                _draw_mute_indicator(frame, sound_player.muted, mute_rect, pressed,
+                                      panel_x, _PANEL_TOP)
+                _draw_room_indicator(frame, link.room(),
+                                      panel_x, _PANEL_TOP + _MUTE_SLOT_H)
+                cv2.imshow(_WINDOW, frame.img)
+                if game_over_reported and banner_text is None:
+                    # The banner's own 2-second cycle has finished: the
+                    # final position and the outcome have both had their
+                    # moment on screen, so this game is done -- back to
+                    # home (Step 12), not a break driven by any key.
+                    quit_outright = False
+                    break
+            key = cv2.waitKey(16) & 0xFF
+            # Compared case-insensitively: cv2.waitKey returns whatever
+            # code the OS reports for the physical key, which is
+            # upper-case while Caps Lock is on or Shift is held --
+            # ord("q")/ord("m") alone then never match for the rest of the
+            # session, silently, with no error and no visible symptom
+            # beyond "the key does nothing" (Esc still quits, since 27 has
+            # no case, so this is easy to miss entirely).
+            if key in (27, ord("q"), ord("Q")):
+                break
+            if key in (ord("m"), ord("M")):
+                sound_player.toggle_mute()
+                mute_pressed_holder["at_ms"] = int((time.time() - start_time) * 1000)
+            # OpenCV does not treat the window's own close ("X") button as
+            # a key press -- cv2.waitKey above never sees it, so Esc/Q
+            # cannot catch it. WND_PROP_VISIBLE drops below 1 the moment
+            # the OS actually closes the window, which is the only signal
+            # there is for that click; checked every tick, right after
+            # waitKey has had its chance to pump that event.
+            if cv2.getWindowProperty(_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+    finally:
+        cv2.destroyAllWindows()
+    return quit_outright
 
-    cv2.destroyAllWindows()
+
+def run():
+    # pragma: no cover
+    """Log in (retrying on a refusal instead of exiting the process --
+    Step 12), then loop: show the home dialog (ask_room, now the
+    project's Home screen -- the logged-in username and rating, and
+    Create/Join/Play/Quit), send its outcome on the SAME connection
+    _login already opened, wait for a seat, play one game
+    (_play_one_game), and go back to the home dialog once it ends
+    naturally -- until Quit is chosen or a game ends by the player
+    quitting outright instead.
+
+    Never closes and reopens the connection between games: see this
+    module's own docstring for why that would look like a duplicate
+    login to the server's own check (Step 11). Only the OpenCV window
+    itself (_play_one_game) and the per-game UI stack (build_client) are
+    rebuilt fresh each round; `link` and `sound_player` persist across
+    the whole loop.
+
+    A refusal or timeout while getting a seat (e.g. "room_exists",
+    "no_such_room", or Play finding no opponent) ends the program
+    outright rather than returning to the home dialog: the server closes
+    the connection itself in every one of those cases (see server.py's
+    _seat_for_choice and _play_matchmaking), so there is no connection
+    left to reuse for another attempt -- the same terminal ending this
+    client always had for these refusals, before Step 12.
+
+    Every return path goes through a `finally` that calls roomdialog.
+    shutdown() exactly once -- the one persistent Tk root every dialog in
+    that module shares (see its own docstring) must be destroyed
+    somewhere, and this is the one place that sees every way run() can
+    end. A no-op if no dialog was ever shown (e.g. _login() itself quit
+    first, before ask_room ever ran)."""
+    _log.info("client starting")
+    try:
+        flow, link = _login()
+        if link is None:
+            return
+        sound_player = SoundPlayer(_SOUNDS)
+        while flow.state != QUIT:
+            dialog_action, room_name = ask_room(username=flow.username, rating=link.rating())
+            flow.chose(dialog_action, room_name)
+            if flow.state == QUIT:
+                break
+            link.reset_for_new_round()
+            link.send(_room_message_from_dialog(dialog_action, room_name))
+            if dialog_action == PLAY:
+                show_matchmaking_progress(link)  # live-testing fix: the
+                #   search is shown, counting down, in its own small
+                #   window instead of leaving the player watching nothing
+                #   but a terminal line -- see its own docstring.
+                if link.error() is not None:
+                    print(f"Connection refused by server: {link.error()}")
+                    return
+                if link.matchmaking_status() == "timeout":
+                    show_no_opponent_found()
+                    return
+                # Either "found" (a real match) or a direct reconnect to
+                # a held seat (Step 12, no "found" ever sent) -- the
+                # server already sent `assigned` either way, see
+                # show_matchmaking_progress's own docstring, so falling
+                # through into the ordinary wait below picks it up with
+                # no special case of its own.
+            _wait_for_assignment_or_error(link)
+            if link.error() is not None:
+                print(f"Connection refused by server: {link.error()}")
+                return
+            controller, renderer, bus, banner, countdown_overlay, panel = \
+                build_client(link, sound_player)
+            quit_outright = _play_one_game(controller, renderer, link, bus, banner,
+                                            countdown_overlay, panel, sound_player)
+            flow.game_ended()
+            if quit_outright:
+                return
+    finally:
+        shutdown_dialogs()
 
 
 if __name__ == "__main__":  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
-    # The username must be known before file logging is configured -- one
-    # log file per client (see _client_log_path), not a shared
-    # logs/client.log every window on this machine would interleave into.
-    # Console (above) is for watching a session live; the file (below) is
-    # for looking at one afterward -- slide 6 wants both, and this is what
-    # makes there be a file to look at. Shared with server.py, so the two
-    # log files cannot drift into different formats.
-    _username = _prompt_username()
-    _password = _prompt_password()
-    add_file_logging(_client_log_path(_username))
-    run(_username, _password)
+    # Console (above) is for watching a session live; per-client file
+    # logging (below) is for looking at one afterward -- slide 6 wants
+    # both, and this is what makes there be a file to look at. Configured
+    # by _login() itself, once a login actually succeeds -- see its own
+    # docstring for why not here, unlike before Step 12: the username
+    # a file is named after is not known, or even final, until then.
+    # Shared with server.py, so the two log files cannot drift into
+    # different formats.
+    run()

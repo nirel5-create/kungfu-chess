@@ -161,3 +161,43 @@ def test_a_fresh_countdown_takes_priority_over_a_still_showing_reconnected_messa
     assert len(frame.calls) == 1
     (args, _kwargs) = frame.calls[0]
     assert "disconnected" in args[0]
+
+
+# --- CountdownOverlay waiting-for-opponent (live-testing fix) ----------------
+
+def test_waiting_draws_the_waiting_text():
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 0, waiting=True)
+    assert len(frame.calls) == 1
+    (args, _kwargs) = frame.calls[0]
+    assert "Waiting" in args[0]
+
+
+def test_waiting_defaults_to_false_and_draws_nothing_on_its_own():
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 0)
+    assert frame.calls == []
+
+
+def test_waiting_takes_priority_over_a_live_countdown():
+    # A game with an empty seat has no opponent to disconnect -- a
+    # nonzero `seconds` here can only be a stale leftover from a previous
+    # round on the same reused connection (Step 12).
+    overlay = CountdownOverlay()
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, 20, 0, waiting=True)
+    assert len(frame.calls) == 1
+    (args, _kwargs) = frame.calls[0]
+    assert "Waiting" in args[0]
+
+
+def test_waiting_takes_priority_over_a_reconnected_confirmation():
+    overlay = CountdownOverlay()
+    overlay.show_reconnected(0)
+    frame = _FakeFrame(width=900, height=700)
+    overlay.draw(frame, None, 100, waiting=True)
+    assert len(frame.calls) == 1
+    (args, _kwargs) = frame.calls[0]
+    assert "Waiting" in args[0]

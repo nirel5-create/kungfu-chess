@@ -270,6 +270,34 @@ class GameRegistry:
             return False
         return bool(game.connected)
 
+    def both_seated(self, game_id):
+        """-> whether BOTH "w" and "b" are currently held by some username
+        in `game_id`. False for an unknown game_id too, the same
+        tolerance color_of/seats/has_connected_players already show.
+
+        Added for a bug found by live testing: a lone player in an
+        otherwise-empty room could walk a piece across the board, over
+        several real-time moves, and capture the opponent's undefended
+        king with nobody ever having joined to defend it -- a free,
+        repeatable win (create a room, capture the lone king, repeat).
+        server.py uses this to hold a game's board in a waiting state --
+        no move is forwarded to GameSession.submit, so no motion ever
+        starts and no capture is ever possible -- until this turns True,
+        and to tell a waiting client so (protocol.waiting), rather than
+        leaving the board simply looking frozen with no explanation.
+
+        Seats are sticky (join() never clears one, only leave() marks its
+        holder away -- see join()'s own docstring), so once True for a
+        given game_id this stays True even if a player later disconnects:
+        a game that has genuinely started is never held "waiting" again
+        just because someone stepped away -- only server.py's own
+        disconnect countdown (slide 5.2) governs that case, unchanged."""
+        game = self._games.get(game_id)
+        if game is None:
+            return False
+        colors = set(game.seats.values())
+        return "w" in colors and "b" in colors
+
     def advance(self, ms):
         """Tick every live game's session by `ms`, publish GAME_END exactly
         once for each game that just became game_over (by king capture or

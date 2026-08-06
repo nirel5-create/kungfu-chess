@@ -119,15 +119,18 @@ class BannerOverlay:
 
 
 _RECONNECTED_TEXT = "Opponent reconnected"
+_WAITING_TEXT = "Waiting for an opponent..."
 _RECONNECTED_MS = 2000  # how long the reconnect confirmation stays up
 _COUNTDOWN_COLOR = (60, 60, 255, 255)   # red-ish: something is wrong
 _RECONNECTED_COLOR = (80, 200, 80, 255)  # green-ish: good news, unlike the countdown
+_WAITING_COLOR = (60, 60, 255, 255)  # same red-ish as the countdown: nothing can happen yet either
 
 
 class CountdownOverlay:
-    """Draws connection-status text over the board -- not the side panel,
-    per Step 9: the opponent may or may not still be there, so neither
-    message this class shows should be easy to miss.
+    """Draws connection/opponent-status text over the board -- not the
+    side panel, per Step 9: the opponent may or may not still be there
+    (or may not have joined at all yet, live-testing's own addition), so
+    none of the messages this class shows should be easy to miss.
 
     Reuses BannerOverlay's drawing pattern (the shared _draw_with_backing
     above) but not its bus-driven state machine. The countdown itself
@@ -156,16 +159,27 @@ class CountdownOverlay:
         game_over flag every frame."""
         self._reconnected_shown_at_ms = elapsed_ms
 
-    def draw(self, frame, seconds, elapsed_ms):
-        """Draw the live countdown if one is running (`seconds` is not
-        None). Otherwise, draw "Opponent reconnected" if show_reconnected()
-        was called within the last _RECONNECTED_MS of `elapsed_ms`. A
-        no-op -- frame untouched -- when neither applies.
+    def draw(self, frame, seconds, elapsed_ms, waiting=False):
+        """Draw "Waiting for an opponent..." if `waiting` is True (live-
+        testing fix: a game with an empty seat must say so, not just look
+        frozen -- see server.py's own module docstring for the exploit
+        this closes). Otherwise, draw the live countdown if one is
+        running (`seconds` is not None), or "Opponent reconnected" if
+        show_reconnected() was called within the last _RECONNECTED_MS of
+        `elapsed_ms`. A no-op -- frame untouched -- when none apply.
 
-        A fresh disconnect always takes priority over a still-showing
-        reconnect confirmation: `seconds` reflects what is actually
-        happening right now, which matters more than a message about what
-        just finished happening."""
+        `waiting` takes priority over everything else: a game with an
+        empty seat has no opponent to disconnect or reconnect in the
+        first place, so the other two can only be stale leftovers from a
+        PREVIOUS round on this same reused connection (Step 12) while
+        `waiting` is true. Once `waiting` is false, a fresh disconnect
+        still takes priority over a still-showing reconnect confirmation,
+        as before: `seconds` reflects what is actually happening right
+        now, which matters more than a message about what just finished
+        happening."""
+        if waiting:
+            self._draw_centered(frame, _WAITING_TEXT, _WAITING_COLOR)
+            return
         if seconds is not None:
             self._draw_centered(frame, f"Opponent disconnected: {seconds}s", _COUNTDOWN_COLOR)
             return

@@ -158,6 +158,42 @@ def test_decode_capture_log_raises_bad_payload_on_a_malformed_entry():
     assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
 
 
+# --- rating (Step 12: shown in the home dialog) ------------------------------
+
+def test_rating_message_type_matches_its_constant():
+    assert protocol.rating(1200)["type"] == protocol.RATING
+
+
+def test_rating_round_trips():
+    message = protocol.rating(1187)
+    round_tripped = protocol.loads(protocol.dumps(message))
+    assert round_tripped["rating"] == 1187
+
+
+def test_a_rating_missing_its_field_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.RATING}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
+# --- waiting (live-testing fix: no game runs with only one player) ----------
+
+def test_waiting_message_type_matches_its_constant():
+    assert protocol.waiting(True)["type"] == protocol.WAITING
+
+
+def test_waiting_round_trips():
+    message = protocol.waiting(True)
+    round_tripped = protocol.loads(protocol.dumps(message))
+    assert round_tripped["waiting"] is True
+
+
+def test_a_waiting_missing_its_field_raises_bad_payload():
+    with pytest.raises(ProtocolError) as excinfo:
+        protocol.loads(json.dumps({"type": protocol.WAITING}))
+    assert excinfo.value.code == ProtocolError.BAD_PAYLOAD
+
+
 def test_a_move_whose_src_is_not_a_two_element_int_list_raises_bad_payload():
     with pytest.raises(ProtocolError) as excinfo:
         protocol.loads(json.dumps({"type": protocol.MOVE, "src": [0], "dst": [1, 1]}))
