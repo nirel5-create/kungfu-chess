@@ -25,20 +25,20 @@ network. This is the engine and renderer with nothing else attached.
 
 ```bash
 python server.py     # terminal 1 -- listens on ws://0.0.0.0:8765
-python client.py      # terminal 2 -- one per player/viewer
+python -m client      # terminal 2 -- one per player/viewer
 ```
 
 `server.py` works with no database at all: if `DATABASE_URL` is not set, it
 logs that Postgres is unreachable and serves games anyway (accounts/ratings
 are not implemented yet either — see "What's implemented" below). Run
-`client.py` again in another terminal for a second player, a third for a
-viewer, and so on.
+`python -m client` again in another terminal for a second player, a third
+for a viewer, and so on.
 
 ### 3. Server and client, with Docker
 
 ```bash
 docker compose up -d --build   # starts the server + Postgres containers
-python client.py                # on the host, one per player/viewer
+python -m client                # on the host, one per player/viewer
 ```
 
 The client always runs on the host (it opens a real window and needs a
@@ -49,7 +49,7 @@ survives it.
 
 ## What a player sees
 
-1. **Username**, typed at a terminal prompt (`python client.py` asks before
+1. **Username**, typed at a terminal prompt (`python -m client` asks before
    anything else opens) — free text, no password, no account.
 2. A small **Room** dialog (a real OS window, not drawn inside the game):
    a text box and three buttons.

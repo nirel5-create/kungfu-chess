@@ -69,7 +69,7 @@ own module docstring), so run() calls banner.show_result directly once the
 server's own `game_over` message (_ServerLink.result()) has actually named an
 outcome, rather than through the bus.
 
-Run with:  python client.py
+Run with:  python -m client
 """
 # pylint: disable=too-many-lines
 # Step 12 (slide 3) grew this file past the threshold with the home
@@ -581,7 +581,7 @@ def _draw_mute_indicator(frame, muted, button_rect, pressed, x, y):  # pragma: n
     plain status text, with nothing to suggest it was clickable at all.
 
     The rectangle is drawn straight onto frame.img with cv2.rectangle,
-    the same pattern client.py's own _widen_canvas and client/overlay.
+    the same pattern this module's own _widen_canvas and client/overlay.
     py's _draw_with_backing already use for the same reason: Img (frozen)
     exposes no rectangle primitive of its own."""
     left, top, right, bottom = button_rect
@@ -847,9 +847,39 @@ def _room_message_from_dialog(action, room_name):  # pragma: no cover
     return protocol.play()
 
 
+def _make_on_mouse(controller, sound_player, mute_rect_holder, mute_pressed_holder, start_time):
+                    # pylint: disable=too-many-arguments, too-many-positional-arguments
+                    # pylint: disable=no-member
+    # cv2 is a compiled C extension, so pylint cannot introspect its members
+    # -- EVENT_LBUTTONDOWN/EVENT_RBUTTONDOWN below both exist and work at
+    # runtime, the same false positive _play_one_game's own disable notes.
+    """-> a cv2 mouse callback (event, x, y, flags, param) closing over the
+    per-game state _play_one_game builds it from, extracted out of that
+    function on purpose so it can be called directly in a test with plain
+    values -- on_mouse(event, x, y, None, None) -- with no real window and
+    no real mouse (the mentor-suggested way to test this interface).
+
+    A left click on the mute button's own last-drawn rect (mute_rect_holder,
+    still None before the first frame -- see _play_one_game) toggles mute
+    instead of reaching the controller at all; every other left click is a
+    selection/move (controller.click), and a right click is always a jump
+    (controller.jump) -- the same left/right split as app.py's own handler,
+    just carried over a websocket instead of a local engine."""
+    def on_mouse(event, x, y, _flags, _param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            rect = mute_rect_holder["rect"]
+            if rect is not None and mute_button.is_hit(x, y, rect):
+                sound_player.toggle_mute()
+                mute_pressed_holder["at_ms"] = int((time.time() - start_time) * 1000)
+                return
+            controller.click(x, y)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            controller.jump(x, y)
+    return on_mouse
+
+
 def _play_one_game(controller, renderer, link, bus, banner, countdown_overlay,
-                    panel, sound_player):
-    # pragma: no cover
+                    panel, sound_player):  # pragma: no cover
     # pylint: disable=too-many-locals, too-many-statements, too-many-branches
     # pylint: disable=too-many-arguments, too-many-positional-arguments
     # pylint: disable=too-many-nested-blocks
@@ -895,17 +925,6 @@ def _play_one_game(controller, renderer, link, bus, banner, countdown_overlay,
     function always closes the window itself before returning, so run()
     can show the home dialog again with nothing left over from this
     game's window."""
-    def on_mouse(event, x, y, _flags, _param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            rect = mute_rect_holder["rect"]
-            if rect is not None and mute_button.is_hit(x, y, rect):
-                sound_player.toggle_mute()
-                mute_pressed_holder["at_ms"] = int((time.time() - start_time) * 1000)
-                return
-            controller.click(x, y)
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            controller.jump(x, y)
-
     # Populated on the first frame drawn below, once panel_x is known --
     # a click before that can only be a miss, since nothing is on screen
     # yet to hit. Plain dicts, not bare outer-scope variables: on_mouse
@@ -917,10 +936,12 @@ def _play_one_game(controller, renderer, link, bus, banner, countdown_overlay,
     #   of the last click/keypress that toggled mute, or None before the
     #   first one this game -- see client/mute_button.is_pressed.
 
+    start_time = time.time()
+    on_mouse = _make_on_mouse(controller, sound_player, mute_rect_holder,
+                               mute_pressed_holder, start_time)
     cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(_WINDOW, on_mouse)
 
-    start_time = time.time()
     game_over_reported = False  # -> whether banner.show_result has fired
     #   for this game yet -- see the draw loop for why this is checked
     #   every frame rather than fired once on a bus event.
@@ -1039,8 +1060,7 @@ def _play_one_game(controller, renderer, link, bus, banner, countdown_overlay,
     return quit_outright
 
 
-def run():
-    # pragma: no cover
+def run():  # pragma: no cover
     """Log in (retrying on a refusal instead of exiting the process --
     Step 12), then loop: show the home dialog (ask_room, now the
     project's Home screen -- the logged-in username and rating, and

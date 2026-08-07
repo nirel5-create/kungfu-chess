@@ -331,7 +331,7 @@ Two processes on `localhost`, talking over a real WebSocket:
   stack, but instead of driving a local engine it: sends the player's clicks to
   the server as `move`/`jump` messages, and draws whatever snapshot the server
   last sent.
-Success looks like: run `python server.py` in one terminal, `python client.py` in
+Success looks like: run `python server.py` in one terminal, `python -m client` in
 two others; each client window shows the same board; a move clicked in either
 window is applied by the server and appears in BOTH windows.
 

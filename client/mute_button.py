@@ -3,12 +3,11 @@ button that can be clicked" -- 'm' already toggles it, but a keyboard
 shortcut and a button are the same action reachable two ways, not
 alternatives).
 
-Pure rectangle geometry and a pure hit test, kept out of client.py's own
-mouse callback (pragma: no cover, and -- unlike client/overlay.py's
-classes -- root client.py cannot even be imported for a test at all: it
-shares its name with this very package, and Python's import system always
-resolves `import client` to the package, never the client.py file). Both
-functions here take plain numbers, not an Img or a cv2 handle, so they
+Pure rectangle geometry and a pure hit test, kept out of client/__main__.py's
+own mouse callback (client/__main__.py's _make_on_mouse is itself directly
+testable -- see tests/unit/test_main_on_mouse.py -- but everything below it
+in that module still opens a real window, hence still pragma: no cover).
+Both functions here take plain numbers, not an Img or a cv2 handle, so they
 need no window to test.
 
 is_pressed (live-testing fix) is the same kind of pure timing decision as

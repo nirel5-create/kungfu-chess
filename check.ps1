@@ -9,11 +9,12 @@ python -m pytest -q
 if ($LASTEXITCODE -ne 0) { Write-Host "TESTS FAILED - do not push" -ForegroundColor Red; exit 1 }
 
 Write-Host "`n[pylint (must be 10.00/10)]" -ForegroundColor Cyan
-# common/, server.py, client.py and the client/ package are ours to hold to
-# the style gate. The engine/model/rules/realtime/boardio/texttests/view/
-# input packages are frozen (score ~7.6) and out of scope: shipping style
-# fixes into frozen code is not this project's call to make.
-python -m pylint common server.py client.py client
+# common/, server.py and the client/ package (client.py now lives inside it,
+# as client/__main__.py) are ours to hold to the style gate. The engine/
+# model/rules/realtime/boardio/texttests/view/input packages are frozen
+# (score ~7.6) and out of scope: shipping style fixes into frozen code is
+# not this project's call to make.
+python -m pylint common server.py client
 if ($LASTEXITCODE -ne 0) { Write-Host "PYLINT NOT CLEAN - do not push" -ForegroundColor Red; exit 1 }
 
 if (-not $Full) {

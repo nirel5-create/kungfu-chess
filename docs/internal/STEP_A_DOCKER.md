@@ -207,7 +207,7 @@ passing test.
 1. `docker compose build`
 2. `docker compose up` — watch both containers; the server must log a successful
    DB connection AFTER Postgres reports healthy.
-3. From the host: `python client.py` — the game must be playable as before.
+3. From the host: `python -m client` — the game must be playable as before.
 4. `docker compose down` then `docker compose up` again — data survives.
 5. `.\check.ps1 -Full` — 339 + the new tests, all green.
 6. Confirm `python app.py` still works unchanged.
