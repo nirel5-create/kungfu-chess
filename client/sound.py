@@ -17,10 +17,7 @@ _DEFAULT_NAMES = {
     "capture": "capture.wav",
     "promotion": "promotion.wav",
     "game_over": "game_over.wav",
-    # Reuses move.wav: there is no dedicated jump.wav yet. Dropping one into
-    # assets/sounds and pointing this entry at it is the entire change
-    # needed later -- nothing in this file or GameEventSource has to move.
-    "jump": "move.wav",
+    "jump": "jump.wav",
     # assets/sounds/illegal_move.wav exists but is deliberately NOT mapped
     # here: the server silently ignores an illegal command and sends no
     # rejection (common.net.GameSession.submit just drops it -- see its

@@ -78,7 +78,5 @@ def test_on_sound_plays_again_after_unmuting(tmp_path):
     assert calls == [os.path.join(str(tmp_path), "move.wav")]
 
 
-def test_jump_reuses_move_wav_in_the_default_names_mapping():
-    # There is no dedicated jump.wav yet -- see _DEFAULT_NAMES's comment.
-    # Dropping one in and repointing this entry is the whole later change.
-    assert _DEFAULT_NAMES["jump"] == "move.wav"
+def test_jump_has_its_own_dedicated_sound_file():
+    assert _DEFAULT_NAMES["jump"] == "jump.wav"
