@@ -1077,13 +1077,16 @@ def run():  # pragma: no cover
     rebuilt fresh each round; `link` and `sound_player` persist across
     the whole loop.
 
-    A refusal or timeout while getting a seat (e.g. "room_exists",
-    "no_such_room", or Play finding no opponent) ends the program
+    A room refusal ("room_exists", "no_such_room") ends the program
     outright rather than returning to the home dialog: the server closes
-    the connection itself in every one of those cases (see server.py's
-    _seat_for_choice and _play_matchmaking), so there is no connection
-    left to reuse for another attempt -- the same terminal ending this
-    client always had for these refusals, before Step 12.
+    the connection itself in those cases (see server.py's
+    _seat_for_choice), so there is no connection left to reuse for
+    another attempt -- the same terminal ending this client always had
+    for these refusals, before Step 12. A Play search finding no
+    opponent is different: the server keeps this same connection open
+    for it (see _seat_for_choice's own docstring), so this returns to
+    the home dialog exactly as a finished game does, instead of ending
+    the program.
 
     Every return path goes through a `finally` that calls roomdialog.
     shutdown() exactly once -- the one persistent Tk root every dialog in
@@ -1114,7 +1117,16 @@ def run():  # pragma: no cover
                     return
                 if link.matchmaking_status() == "timeout":
                     show_no_opponent_found()
-                    return
+                    flow.game_ended()  # PLAYING -> HOME: a search that
+                    #   found no opponent ended without ever starting a
+                    #   game, but the home loop it returns to is the same
+                    #   one either way (live-testing fix: this used to
+                    #   `return`, ending the whole client on a failed
+                    #   search -- the one case Step 12's own home loop had
+                    #   missed; see server.py's _seat_for_choice for the
+                    #   matching server-side change that keeps this same
+                    #   connection open for it).
+                    continue
                 # Either "found" (a real match) or a direct reconnect to
                 # a held seat (Step 12, no "found" ever sent) -- the
                 # server already sent `assigned` either way, see

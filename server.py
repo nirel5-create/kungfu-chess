@@ -655,9 +655,18 @@ async def _seat_for_choice(websocket, registry, default_game, matchmaker, matchm
 
     -> (game_id, color) once joined and `assigned` already sent. -> None
     once this connection has already been refused and closed (an `error`
-    already sent) or a Play search has already timed out (matchmaking(
-    "timeout") already sent by _report_matchmaking_timeout) -- either way
-    there is nothing left for the caller to do but stop.
+    already sent) -- there is nothing left for the caller to do but stop.
+
+    A Play search that times out does NOT close the connection or return
+    None: matchmaking("timeout") has already been sent by
+    _report_matchmaking_timeout, and this loops back to _read_room_choice
+    for whatever the player picks next on the SAME connection, exactly as
+    a finished game already does via _run_game_loop -- live-testing fix:
+    a failed search used to end the client outright, the one case Step
+    12's own home-loop had missed. A player who quits instead of picking
+    again sends nothing, so that read simply times out on its own via
+    _ROOM_MESSAGE_TIMEOUT_S, same as any other silent disconnect this
+    function already ends on.
 
     Used identically whether this is the FIRST seat this connection ever
     gets or a LATER one picked after returning home from a previous game
@@ -675,7 +684,8 @@ async def _seat_for_choice(websocket, registry, default_game, matchmaker, matchm
       own held seat sits there waiting for them. Only once game_of finds
       nothing does this fall through to matchmaking: _play_matchmaking
       enqueues this connection and waits for _tick_loop to pair or time
-      it out; a timeout closes the connection with no game ever entered.
+      it out; a timeout re-reads a room choice and loops (this function's
+      own docstring above), rather than ending anything.
     - Room (slide 6): room_create or room_join picks game_id via
       _create_room/_join_room instead of _find_or_create_game, and a
       chosen/created room is confirmed with `room` before anything else --
@@ -687,45 +697,47 @@ async def _seat_for_choice(websocket, registry, default_game, matchmaker, matchm
     - Neither: the ordinary shared game (_find_or_create_game), exactly
       as before Room or Play existed -- it already has its own equivalent
       reconnect exception, for the one default game it remembers."""
-    if room_choice is not None and room_choice[0] == protocol.PLAY:
-        held_game_id = registry.game_of(username)
-        if held_game_id is not None:
-            color = await _join_or_refuse(websocket, registry, held_game_id, username)
-            if color is None:
-                return None
-            await websocket.send(protocol.dumps(protocol.assigned(color)))
-            return held_game_id, color
-        matched = await _play_matchmaking(websocket, matchmaker, matchmaking, db_conn, username)
-        if matched is None:
-            await websocket.close()
-            return None
-        return matched
-    if room_choice is None:
-        game_id = _find_or_create_game(registry, default_game, username)
-    else:
-        action, room_id = room_choice
-        if not is_displayable(room_id):
-            _log.warning("refused %s: undisplayable room name %r", username, room_id)
-            await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
-            await websocket.close()
-            return None
-        if action == protocol.ROOM_CREATE:
-            game_id = _create_room(registry, room_id)
-            refusal = "room_exists"
+    while True:
+        if room_choice is not None and room_choice[0] == protocol.PLAY:
+            held_game_id = registry.game_of(username)
+            if held_game_id is not None:
+                color = await _join_or_refuse(websocket, registry, held_game_id, username)
+                if color is None:
+                    return None
+                await websocket.send(protocol.dumps(protocol.assigned(color)))
+                return held_game_id, color
+            matched = await _play_matchmaking(websocket, matchmaker, matchmaking,
+                                               db_conn, username)
+            if matched is None:
+                room_choice = await _read_room_choice(websocket)
+                continue
+            return matched
+        if room_choice is None:
+            game_id = _find_or_create_game(registry, default_game, username)
         else:
-            game_id = _join_room(registry, room_id)
-            refusal = "no_such_room"
-        if game_id is None:
-            _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
-            await websocket.send(protocol.dumps(protocol.error(refusal)))
-            await websocket.close()
+            action, room_id = room_choice
+            if not is_displayable(room_id):
+                _log.warning("refused %s: undisplayable room name %r", username, room_id)
+                await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
+                await websocket.close()
+                return None
+            if action == protocol.ROOM_CREATE:
+                game_id = _create_room(registry, room_id)
+                refusal = "room_exists"
+            else:
+                game_id = _join_room(registry, room_id)
+                refusal = "no_such_room"
+            if game_id is None:
+                _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
+                await websocket.send(protocol.dumps(protocol.error(refusal)))
+                await websocket.close()
+                return None
+            await websocket.send(protocol.dumps(protocol.room(game_id)))
+        color = await _join_or_refuse(websocket, registry, game_id, username)
+        if color is None:
             return None
-        await websocket.send(protocol.dumps(protocol.room(game_id)))
-    color = await _join_or_refuse(websocket, registry, game_id, username)
-    if color is None:
-        return None
-    await websocket.send(protocol.dumps(protocol.assigned(color)))
-    return game_id, color
+        await websocket.send(protocol.dumps(protocol.assigned(color)))
+        return game_id, color
 
 
 async def _handle_client(websocket, registry, clients, default_game, db_conn,
@@ -863,6 +875,34 @@ def _winner_username(seats, winner):
     return next((user for user, color in seats.items() if color == winner), None)
 
 
+async def _broadcast_countdown(registry, game_id, game_clients, current_countdown_seconds,
+                                last_countdown_seconds, dead):  # pragma: no cover
+                                # pylint: disable=too-many-arguments
+                                # pylint: disable=too-many-positional-arguments
+    """Send protocol.countdown(seconds) to every client in `game_clients`
+    for each away player in `game_id` -- whole seconds, not milliseconds,
+    and only when the value actually changed since the last tick
+    (`last_countdown_seconds`), the same "send on change, not on every
+    tick" reasoning _SUMMARY_INTERVAL_MS already uses. A client whose
+    send fails is added to `dead`, the same convention every other
+    per-tick broadcast in _tick_loop uses, rather than returned.
+
+    Never called for a game that has already ended -- see _tick_loop's
+    own docstring for why."""
+    for username, ms_left in registry.countdown_ms(game_id).items():
+        seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
+        key = (game_id, username)
+        current_countdown_seconds[key] = seconds
+        if last_countdown_seconds.get(key) == seconds:
+            continue
+        countdown_message = protocol.dumps(protocol.countdown(seconds))
+        for websocket in game_clients:
+            try:
+                await websocket.send(countdown_message)
+            except websockets.ConnectionClosed:
+                dead.add(websocket)
+
+
 async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking,
                       observers, rating_updates):  # pragma: no cover
                       # pylint: disable=too-many-locals, too-many-branches
@@ -888,16 +928,22 @@ async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking,
     dropped the connection) is removed from `clients` rather than stopping
     the broadcast for everyone else.
 
-    Also broadcasts the disconnect countdown (slide 5.2): for every game
-    with an away player (GameRegistry.countdown_ms), send protocol.
+    Also broadcasts the disconnect countdown (slide 5.2): for every LIVE
+    game (not session.game_over -- live-testing fix, see below) with an
+    away player (GameRegistry.countdown_ms), send protocol.
     countdown(seconds) -- whole seconds, not milliseconds, and only when
     the second actually changes for that (game, username) pair, the same
     "send on change, not on every tick" reasoning _SUMMARY_INTERVAL_MS
     already uses. `last_countdown_seconds` remembers what was last sent
     per (game_id, username) and is rebuilt from scratch every tick, which
-    is what makes a countdown that stops (the player reconnected, or the
-    game ended) simply stop appearing in it -- nothing to explicitly
-    clean up.
+    is what makes a countdown that stops (the player reconnected) simply
+    stop appearing in it -- nothing to explicitly clean up.
+
+    The game_over check exists because a game can end on the exact same
+    tick an away player's own countdown reaches 0 (auto-resign): without
+    it, that last countdown(0) still goes out alongside game_over,
+    flashing "0s" over the GAME OVER banner for a game that is already
+    decided -- there is nothing left to count down toward once it is.
 
     Also broadcasts the outcome once a game ends: `ended_games` is a plain
     list a GAME_END bus subscriber appends its payload to (see _main) --
@@ -1045,18 +1091,17 @@ async def _tick_loop(registry, clients, ended_games, matchmaker, matchmaking,
                         await websocket.send(history_message)
                     except websockets.ConnectionClosed:
                         dead.add(websocket)
-            for username, ms_left in registry.countdown_ms(game_id).items():
-                seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
-                key = (game_id, username)
-                current_countdown_seconds[key] = seconds
-                if last_countdown_seconds.get(key) == seconds:
-                    continue
-                countdown_message = protocol.dumps(protocol.countdown(seconds))
-                for websocket in game_clients:
-                    try:
-                        await websocket.send(countdown_message)
-                    except websockets.ConnectionClosed:
-                        dead.add(websocket)
+            if not session.game_over:
+                # A game that just ended this very tick (ended_payload
+                # above) can still have an away player whose countdown
+                # reaches exactly 0 the same tick (auto-resign) -- live-
+                # testing fix: skipping this call once game_over is true
+                # is what stops that stray "0s" from flashing over the
+                # GAME OVER banner; there is nothing left to count down
+                # toward once the game itself is decided.
+                await _broadcast_countdown(registry, game_id, game_clients,
+                                            current_countdown_seconds,
+                                            last_countdown_seconds, dead)
         last_countdown_seconds = current_countdown_seconds
         live_game_ids = set(registry.game_ids())
         for stale_id in set(observers) - live_game_ids:
