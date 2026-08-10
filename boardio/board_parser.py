@@ -1,3 +1,11 @@
+"""The text-to-Board half of `boardio` (see board_printer.py's own module
+docstring for the other half). Reads the grid at the top of a VPL script
+into a real Board -- texttests/script_runner.py's own starting position --
+and, together with BoardPrinter, round-trips a board as text for
+tests/unit/test_board_printer.py. Not dead VPL leftovers: script_runner.py
+genuinely parses every script's board section through this class, so it is
+load-bearing for the script-driven test DSL tests/helpers.py's
+`run_fixture()` and the tests/integration/*.kfc suite both depend on."""
 from model.board import Board
 
 

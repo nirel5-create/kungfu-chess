@@ -1,3 +1,11 @@
+"""Executes a parsed script (see script_parser.py's own module docstring for
+the syntax) through the real Controller/GameEngine command path -- never
+Board directly, so anything this drives is proof the public command path
+itself works, not a shortcut around it. This is `texttests`' load-bearing
+half: main.py's `run()` is a thin wrapper around it, tests/helpers.py's
+`run_fixture()` calls that wrapper as a compact test DSL for several core
+unit test files, and tests/integration/test_text_scripts.py runs the whole
+tests/integration/*.kfc suite through it directly."""
 from boardio.board_parser import BoardParser, BoardParseError
 from boardio.board_printer import BoardPrinter
 from engine.game import GameEngine

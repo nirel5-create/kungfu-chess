@@ -1,3 +1,12 @@
+"""The syntax half of the small script DSL `texttests` implements -- a board
+section plus a line-oriented list of click/wait/jump/print commands (see
+Script/Command below). `texttests` is not leftover VPL-protocol machinery:
+main.py's `run()` still exposes it as a literal text-in/text-out interface,
+but its main consumer today is the test suite itself -- tests/helpers.py's
+`run_fixture()` uses it as a compact way to script a scenario across several
+core unit test files, and tests/integration/*.kfc is its own end-to-end
+suite for the DSL. See script_runner.py's own module docstring for the half
+that actually executes a parsed Script."""
 from collections import namedtuple
 
 # One line of the script: a verb, its arguments, and -- for `print board` --
