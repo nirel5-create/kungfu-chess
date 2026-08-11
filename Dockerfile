@@ -24,7 +24,13 @@ RUN pip install --no-cache-dir \
 
 # Only what the server actually imports -- not tests/, assets/, client.py,
 # app.py, or view/ (the OpenCV rendering stack, which stays on the host).
+# server.py is only the thin entry-point shim since the Stage 2 refactor
+# split its real code into server/ -- copying the shim alone left the
+# container crash-looping on ModuleNotFoundError: No module named
+# 'server.composition', caught only by actually starting the container,
+# since the package exists on the host either way.
 COPY server.py .
+COPY server/ server/
 COPY common/ common/
 COPY engine/ engine/
 COPY model/ model/
