@@ -6,16 +6,36 @@ instead of passed as separate parameters everywhere they are used together.
 from collections import namedtuple
 
 
-class _PlayQueue:  # pylint: disable=too-few-public-methods
+class _PlayQueue:
     """Play's queue and its per-connection wait boxes, together: the pure
     pairing queue (common.matchmaker.MatchMaker) and the {username:
     (websocket, future, rating)} boxes the tick loop resolves once paired
-    or timed out. Bundled because nothing outside server.matchmaking and
-    server.tick touches either one."""
+    or timed out. Exposes methods for both instead of the two collaborators
+    directly, so server.matchmaking/server.tick call one thing, not two."""
 
     def __init__(self, matchmaker):
         self.matchmaker = matchmaker
         self.matchmaking = {}
+
+    def enqueue(self, username, rating, websocket, future):  # pragma: no cover
+        """Register `username`'s wait box and enter them into the
+        matchmaker's queue at `rating`."""
+        self.matchmaking[username] = (websocket, future, rating)
+        self.matchmaker.enqueue(username, rating)
+
+    def cancel(self, username):  # pragma: no cover
+        """Drop `username` from the matchmaker's queue and its wait box.
+        A no-op for a username not currently waiting."""
+        self.matchmaker.cancel(username)
+        self.matchmaking.pop(username, None)
+
+    def advance(self, ms):  # pragma: no cover
+        """-> (pairs, timed_out) for this tick; see MatchMaker.advance."""
+        return self.matchmaker.advance(ms)
+
+    def waiting_entry(self, username):  # pragma: no cover
+        """-> (websocket, future, rating) for `username`'s wait box."""
+        return self.matchmaking[username]
 
 
 class ServerState:  # pylint: disable=too-few-public-methods

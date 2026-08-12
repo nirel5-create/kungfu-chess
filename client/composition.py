@@ -43,16 +43,36 @@ _log = logging.getLogger(__name__)
 _CONFIG = Config(cell_size=98, board_offset=(13, 15))
 
 
-class _Overlays:  # pylint: disable=too-few-public-methods
+class _Overlays:
     """The two things drawn on top of the rendered board itself, rather
     than the board or the side panel: the win/loss banner and the
     disconnect-countdown overlay. Bundled out of _GameUI's own
-    constructor so it stays at 5 parameters, not 6 -- pylint's own
-    threshold, not an arbitrary one."""
+    constructor so it stays at 5 parameters, not 6, and exposes methods
+    for both so client.play calls one thing, not two."""
 
     def __init__(self, banner, countdown_overlay):
         self.banner = banner
         self.countdown_overlay = countdown_overlay
+
+    def show_result(self, winner, winner_username):  # pragma: no cover
+        """Queue the end banner naming the actual outcome; see
+        BannerOverlay.show_result."""
+        self.banner.show_result(winner, winner_username)
+
+    def show_reconnected(self, elapsed_ms):  # pragma: no cover
+        """Queue the "Opponent reconnected" confirmation; see
+        CountdownOverlay.show_reconnected."""
+        self.countdown_overlay.show_reconnected(elapsed_ms)
+
+    def draw_all(self, frame, elapsed_ms, countdown_seconds, waiting):  # pragma: no cover
+        """Draw the banner then the countdown overlay onto `frame`. ->
+        the banner text showing this frame, or None -- BannerOverlay.draw
+        reads the identical text a second time internally, safe only
+        because showing() is idempotent once already promoted this frame."""
+        banner_text = self.banner.showing(elapsed_ms)
+        self.banner.draw(frame, elapsed_ms)
+        self.countdown_overlay.draw(frame, countdown_seconds, elapsed_ms, waiting=waiting)
+        return banner_text
 
 
 class _GameUI:  # pylint: disable=too-few-public-methods

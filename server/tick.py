@@ -160,11 +160,11 @@ async def _advance_matchmaking(state):  # pragma: no cover
     _play_matchmaking future -- the actual hand-off back to the waiting
     coroutine. A direct call rather than the bus, since there is exactly
     one interested party per outcome."""
-    pairs, timed_out = state.play_queue.matchmaker.advance(_TICK_MS)
+    pairs, timed_out = state.play_queue.advance(_TICK_MS)
     for user_a, user_b in pairs:
         await _seat_matched_pair(state, user_a, user_b)
     for username in timed_out:
-        await _report_matchmaking_timeout(state.play_queue.matchmaking, username)
+        await _report_matchmaking_timeout(state.play_queue, username)
 
 
 async def _push_rating_updates(state, rating_updates, dead):  # pragma: no cover

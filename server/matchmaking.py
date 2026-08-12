@@ -22,8 +22,7 @@ async def _play_matchmaking(websocket, state, username):  # pragma: no cover
     once, instead of possibly pairing a live opponent with someone gone."""
     rating = _current_rating(state.db_conn, username)
     future = asyncio.get_running_loop().create_future()
-    state.play_queue.matchmaking[username] = (websocket, future, rating)
-    state.play_queue.matchmaker.enqueue(username, rating)
+    state.play_queue.enqueue(username, rating, websocket, future)
     _log.info("%s entered matchmaking at rating %d", username, rating)
     try:
         await websocket.send(protocol.dumps(protocol.matchmaking("searching")))
@@ -36,8 +35,7 @@ async def _play_matchmaking(websocket, state, username):  # pragma: no cover
     except websockets.ConnectionClosed:
         return None
     finally:
-        state.play_queue.matchmaker.cancel(username)
-        state.play_queue.matchmaking.pop(username, None)
+        state.play_queue.cancel(username)
 
 
 async def _seat_matched_pair(state, user_a, user_b):  # pragma: no cover
@@ -48,7 +46,7 @@ async def _seat_matched_pair(state, user_a, user_b):  # pragma: no cover
     fails, sending the survivor into the ordinary disconnect countdown."""
     game_id = state.registry.create()
     for username in (user_a, user_b):
-        websocket, future, rating = state.play_queue.matchmaking[username]
+        websocket, future, rating = state.play_queue.waiting_entry(username)
         color = state.registry.join(game_id, username)
         try:
             await websocket.send(protocol.dumps(protocol.matchmaking("found")))
@@ -63,10 +61,10 @@ async def _seat_matched_pair(state, user_a, user_b):  # pragma: no cover
                    username, rating, game_id, color)
 
 
-async def _report_matchmaking_timeout(matchmaking, username):  # pragma: no cover
+async def _report_matchmaking_timeout(play_queue, username):  # pragma: no cover
     """Tell a timed-out seeker their search found nobody, and release
     their _play_matchmaking coroutine."""
-    websocket, future, rating = matchmaking[username]
+    websocket, future, rating = play_queue.waiting_entry(username)
     try:
         await websocket.send(protocol.dumps(protocol.matchmaking("timeout")))
     except websockets.ConnectionClosed:

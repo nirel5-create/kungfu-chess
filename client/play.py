@@ -68,7 +68,7 @@ def _update_game_over_banner(ui, link, snapshot, state):  # pragma: no cover
         if not state.game_over_reported:
             result = link.result()
             if result is not None:
-                ui.overlays.banner.show_result(*result)
+                ui.overlays.show_result(*result)
                 state.game_over_reported = True
     else:
         state.game_over_reported = False
@@ -82,7 +82,7 @@ def _update_countdown_overlay(ui, link, snapshot, elapsed_ms, state):  # pragma:
     countdown_seconds = link.countdown()
     if (state.previous_countdown_seconds is not None and countdown_seconds is None
             and not snapshot.game_over):
-        ui.overlays.countdown_overlay.show_reconnected(elapsed_ms)
+        ui.overlays.show_reconnected(elapsed_ms)
     state.previous_countdown_seconds = countdown_seconds
     return countdown_seconds
 
@@ -112,17 +112,10 @@ def _draw_one_frame(ui, link, sound_player, state, snapshot):  # pragma: no cove
     _update_game_over_banner(ui, link, snapshot, state)
     countdown_seconds = _update_countdown_overlay(ui, link, snapshot, elapsed_ms, state)
     frame = ui.renderer.render(snapshot, elapsed_ms)
-    # Read once, before draw() consumes the same pending/expiry
-    # transition -- showing() is idempotent once already promoted this
-    # frame, so draw()'s own internal call below sees the identical
-    # text, just without needing its own return value plumbed back out.
-    banner_text = ui.overlays.banner.showing(elapsed_ms)
-    ui.overlays.banner.draw(frame, elapsed_ms)  # centered on the true
-    #   board size, before the canvas is widened below -- see
-    #   _widen_canvas.
-    ui.overlays.countdown_overlay.draw(frame, countdown_seconds, elapsed_ms,
-                                        waiting=link.waiting())  # same
-    #   reason: drawn over the true board, not the widened panel strip.
+    # Both overlays draw centered on the true board size, before the
+    # canvas is widened below -- see _widen_canvas.
+    banner_text = ui.overlays.draw_all(frame, elapsed_ms, countdown_seconds,
+                                        waiting=link.waiting())
     frame = _widen_canvas(frame, _PANEL_WIDTH)
     ui.panel.draw(frame)
     panel_x = frame.img.shape[1] - _PANEL_WIDTH + 20
