@@ -27,6 +27,9 @@ JOIN = "join"
 PLAY = "play"
 QUIT = "quit"
 
+_PROGRESS_POLL_MS = 200  # how often ask_room/show_matchmaking_progress
+#                          poll a link for a change while their dialog is open
+
 _root = None  # pylint: disable=invalid-name
 # Mutable module state (reassigned by _get_root/shutdown via `global`),
 # not a constant -- pylint's naming check cannot tell the difference for
@@ -63,12 +66,12 @@ def normalize_room_name(text):
     return text.strip()
 
 
-def ask_room(title="Home", username=None, rating=None):  # pragma: no cover -- opens a real window
+def ask_room(title="Home", username=None, rating=None, link=None):  # pragma: no cover
     """Show the Home screen: a room-name entry plus Create/Join/Play/Quit.
-    -> (action, room_name), with room_name "" for Play, Quit, or the
-    window's own close (treated as Quit: this dialog reappears after
-    every game, so closing it almost certainly means "done"). An empty
-    or invalid Create/Join name re-shows the problem in place."""
+    -> (action, room_name), with room_name "" for Play, Quit, the
+    window's own close, or `link` reporting an error while this is open
+    (all three treated as Quit: see the polling below). An empty or
+    invalid Create/Join name re-shows the problem in place instead."""
     result = [QUIT, ""]
     root = _get_root()
     dialog = tk.Toplevel(root)
@@ -116,6 +119,17 @@ def ask_room(title="Home", username=None, rating=None):  # pragma: no cover -- o
     # see this function's own docstring.
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose(QUIT))
 
+    def check_link():
+        if not dialog.winfo_exists():
+            return  # choose() (or the window's own close) already ended this
+        if link.error() is not None:
+            dialog.destroy()
+            return
+        dialog.after(_PROGRESS_POLL_MS, check_link)
+
+    if link is not None:
+        dialog.after(0, check_link)
+
     dialog.grab_set()
     root.wait_window(dialog)
     return tuple(result)
@@ -144,7 +158,14 @@ def show_room_refused(reason):  # pragma: no cover -- opens a real window
     messagebox.showerror("Room", _ROOM_REFUSAL_MESSAGES.get(reason, reason), parent=_get_root())
 
 
-_PROGRESS_POLL_MS = 200  # how often the countdown label is refreshed
+def show_session_expired():  # pragma: no cover -- opens a real window
+    """Tell the player the server gave up waiting for a room choice, via
+    a real OS dialog, right before the client logs in again from a fresh
+    prompt -- this connection is gone, not reusable."""
+    messagebox.showinfo(
+        "Session expired",
+        "You took too long to choose. Please log in again.",
+        parent=_get_root())
 
 
 def _outcome_known(link):

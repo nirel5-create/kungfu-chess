@@ -202,26 +202,20 @@ class GameRegistry:
                     del self._games[game_id]
 
     def _advance_countdowns(self, game_id, game, ms):
-        """Add `ms` to every seated player's disconnect countdown and
-        auto-resign whoever reaches DISCONNECT_GRACE_MS. Winner is the
-        seated color that did NOT time out; if both did, or a color was
-        never seated (excluded, not "remaining"), the winner is None.
-        Ends the game the same way a king capture does, one GAME_END."""
+        """Add `ms` to every seated player's disconnect countdown; once
+        any reaches DISCONNECT_GRACE_MS, end the game. Winner is the
+        seated color still connected -- not merely one whose countdown
+        hasn't expired yet, since a later-leaving player is still away,
+        not "remaining." None if both seats are away, or neither seated."""
         if not game.away_ms:
             return
-        expired = set()
         for username in game.away_ms:
             game.away_ms[username] += ms
-            if game.away_ms[username] >= DISCONNECT_GRACE_MS:
-                expired.add(username)
-        if not expired:
+        if not any(away >= DISCONNECT_GRACE_MS for away in game.away_ms.values()):
             return
-        seated_colors = [color for color in _SEAT_COLORS
-                          if self._username_at(game, color) is not None]
-        expired_colors = {color for color in seated_colors
-                           if self._username_at(game, color) in expired}
-        remaining_colors = [c for c in seated_colors if c not in expired_colors]
-        winner = remaining_colors[0] if len(remaining_colors) == 1 else None
+        connected_colors = [color for color in _SEAT_COLORS
+                             if self._username_at(game, color) in game.connected]
+        winner = connected_colors[0] if len(connected_colors) == 1 else None
         game.session.force_game_over()  # no king was captured, so the
         #   (frozen) engine has no idea this game just ended.
         game.ended = True
@@ -236,8 +230,8 @@ class GameRegistry:
         """-> the username seated at `color` in `game`, or None if that
         seat has never been taken. A small lookup helper for
         _advance_countdowns, which needs to go from a color to "is THIS
-        color's occupant currently expired" -- the reverse direction of
-        the more common username -> color lookups elsewhere."""
+        color's occupant currently connected" -- the reverse direction
+        of the more common username -> color lookups elsewhere."""
         for username, seat_color in game.seats.items():
             if seat_color == color:
                 return username

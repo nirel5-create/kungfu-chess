@@ -61,6 +61,13 @@ WAITING = "waiting"
 # of ending the session as every other `error` reason still does.
 ROOM_REFUSAL_REASONS = frozenset({"invalid_room_name", "room_exists", "no_such_room"})
 
+# Sent when the server gives up waiting for a room choice -- the initial
+# one, or a fresh one after a refusal/timed-out search -- and closes the
+# connection (see server.rooms._read_room_choice and server.connection.
+# _seat_for_choice). Unlike ROOM_REFUSAL_REASONS, this ends the session:
+# the client logs in again rather than reusing this connection.
+IDLE_TIMEOUT = "idle_timeout"
+
 # type -> field names a message of that type must carry.
 _REQUIRED_FIELDS = {
     LOGIN: ("username", "password"),

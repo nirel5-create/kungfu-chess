@@ -1,7 +1,7 @@
 """The composition root: build_client wires one game's graphical stack
-together, and run() drives the whole client -- login once, then loop
-showing the home dialog and playing games on the same connection until the
-player quits.
+together, and run() drives the whole client -- log in, then loop showing
+the home dialog and playing games on that connection until the player
+quits or the session itself expires, in which case it logs in again.
 """
 
 import logging
@@ -17,6 +17,7 @@ from client.play import _play_one_game
 from client.roomdialog import (
     CREATE, JOIN, PLAY, ask_room, shutdown as shutdown_dialogs,
     show_matchmaking_progress, show_no_opponent_found, show_room_refused,
+    show_session_expired,
 )
 from client.sound import SoundPlayer
 from common import net, protocol, topics
@@ -165,64 +166,80 @@ def _room_message_from_dialog(action, room_name):  # pragma: no cover
     return protocol.play()
 
 
+def _play_session():  # pragma: no cover
+    """One login and everything after it on that connection, until the
+    session ends. -> True to log in again (the session merely expired
+    waiting for a choice), False to end the program (Quit, a mid-game
+    quit, or any other connection-ending refusal)."""
+    flow, link = _login()
+    if link is None:
+        return False
+    sound_player = SoundPlayer(_SOUNDS)
+    while flow.state != QUIT:
+        dialog_action, room_name = ask_room(
+            username=flow.username, rating=link.rating(), link=link)
+        if link.error() == protocol.IDLE_TIMEOUT:
+            # ask_room already closed itself the moment this arrived (it
+            # polls link.error() while open); reset below would erase it
+            # unseen, and sending into an already-closed connection
+            # would hang the wait forever. Caught here, before either.
+            show_session_expired()
+            return True
+        flow.chose(dialog_action, room_name)
+        if flow.state == QUIT:
+            break
+        link.reset_for_new_round()
+        link.send(_room_message_from_dialog(dialog_action, room_name))
+        if dialog_action == PLAY:
+            # Shown in its own small window, counting down, rather than
+            # leaving the player watching nothing but a terminal line.
+            show_matchmaking_progress(link)
+            if link.matchmaking_status() == "timeout":
+                show_no_opponent_found()
+                # PLAYING -> HOME: no game was ever started, but this
+                # returns to the home loop like a finished game does,
+                # since the server keeps this connection open for a
+                # search that found no opponent.
+                flow.game_ended()
+                continue
+            # A real match, a reconnect to a held seat, or a refusal --
+            # the server already sent `assigned`/`error` either way, so
+            # the ordinary wait below picks it up with no special case.
+        _wait_for_assignment_or_error(link)
+        if link.error() is not None:
+            if link.error() in protocol.ROOM_REFUSAL_REASONS:
+                # The server kept this connection open for a bad room
+                # choice: show why, then go back to the home dialog on
+                # the same connection, the same PLAYING -> HOME shape
+                # the no-opponent-found branch above already uses.
+                show_room_refused(link.error())
+                flow.game_ended()
+                continue
+            if link.error() == protocol.IDLE_TIMEOUT:
+                show_session_expired()
+                return True
+            # Any other reason (e.g. already_connected) means the
+            # server already closed this connection -- nothing left
+            # to reuse.
+            print(f"Connection refused by server: {link.error()}")
+            return False
+        ui = build_client(link, sound_player)
+        quit_outright = _play_one_game(ui, link, sound_player)
+        flow.game_ended()
+        if quit_outright:
+            return False
+    return False
+
+
 def run():  # pragma: no cover
-    """Log in, then loop: show the home dialog, send its choice on the
-    same connection, wait for a seat, and play one game, until Quit or
-    a mid-game quit. The connection stays open across games -- reopening
-    it would look like a duplicate login to the server -- so only the
-    window and per-game UI stack are rebuilt each round."""
+    """Log in, then play until the session ends -- Quit, a mid-game
+    quit, or any connection-ending refusal -- logging in again first if
+    it merely expired (protocol.IDLE_TIMEOUT) instead of ending the
+    program."""
     _log.info("client starting")
     try:
-        flow, link = _login()
-        if link is None:
-            return
-        sound_player = SoundPlayer(_SOUNDS)
-        while flow.state != QUIT:
-            dialog_action, room_name = ask_room(username=flow.username, rating=link.rating())
-            flow.chose(dialog_action, room_name)
-            if flow.state == QUIT:
-                break
-            link.reset_for_new_round()
-            link.send(_room_message_from_dialog(dialog_action, room_name))
-            if dialog_action == PLAY:
-                # Shown in its own small window, counting down, rather
-                # than leaving the player watching nothing but a
-                # terminal line.
-                show_matchmaking_progress(link)
-                if link.error() is not None:
-                    print(f"Connection refused by server: {link.error()}")
-                    return
-                if link.matchmaking_status() == "timeout":
-                    show_no_opponent_found()
-                    # PLAYING -> HOME: no game was ever started, but this
-                    # returns to the home loop like a finished game does,
-                    # since the server keeps this connection open for a
-                    # search that found no opponent.
-                    flow.game_ended()
-                    continue
-                # Either a real match or a reconnect to a held seat -- the
-                # server already sent `assigned` either way, so the
-                # ordinary wait below picks it up with no special case.
-            _wait_for_assignment_or_error(link)
-            if link.error() is not None:
-                if link.error() in protocol.ROOM_REFUSAL_REASONS:
-                    # The server kept this connection open for a bad room
-                    # choice: show why, then go back to the home dialog on
-                    # the same connection, the same PLAYING -> HOME shape
-                    # the no-opponent-found branch above already uses.
-                    show_room_refused(link.error())
-                    flow.game_ended()
-                    continue
-                # Any other reason (e.g. already_connected) means the
-                # server already closed this connection -- nothing left
-                # to reuse.
-                print(f"Connection refused by server: {link.error()}")
-                return
-            ui = build_client(link, sound_player)
-            quit_outright = _play_one_game(ui, link, sound_player)
-            flow.game_ended()
-            if quit_outright:
-                return
+        while _play_session():
+            pass
     finally:
         shutdown_dialogs()  # the one persistent Tk root every dialog
         # shares must be destroyed somewhere; a no-op if no dialog was

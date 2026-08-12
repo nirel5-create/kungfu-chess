@@ -9,9 +9,9 @@ Every name below is re-exported here so `from common import protocol` and
 """
 
 from common.protocol.core import (
-    ASSIGNED, COUNTDOWN, ERROR, GAME_OVER, HISTORY, JUMP, LOGIN, MATCHMAKING,
-    MOVE, PLAY, RATING, ROOM, ROOM_CREATE, ROOM_JOIN, ROOM_REFUSAL_REASONS,
-    STATE, WAITING, CaptureEntry, ProtocolError, dumps, loads,
+    ASSIGNED, COUNTDOWN, ERROR, GAME_OVER, HISTORY, IDLE_TIMEOUT, JUMP, LOGIN,
+    MATCHMAKING, MOVE, PLAY, RATING, ROOM, ROOM_CREATE, ROOM_JOIN,
+    ROOM_REFUSAL_REASONS, STATE, WAITING, CaptureEntry, ProtocolError, dumps, loads,
 )
 from common.protocol.messages import (
     assigned, countdown, error, game_over, history, jump, login, matchmaking,
@@ -20,10 +20,10 @@ from common.protocol.messages import (
 from common.protocol.snapshot import decode_capture_log, decode_snapshot, encode_snapshot
 
 __all__ = [
-    "ASSIGNED", "COUNTDOWN", "ERROR", "GAME_OVER", "HISTORY", "JUMP", "LOGIN",
-    "MATCHMAKING", "MOVE", "PLAY", "RATING", "ROOM", "ROOM_CREATE", "ROOM_JOIN",
-    "ROOM_REFUSAL_REASONS", "STATE", "WAITING", "CaptureEntry", "ProtocolError",
-    "dumps", "loads",
+    "ASSIGNED", "COUNTDOWN", "ERROR", "GAME_OVER", "HISTORY", "IDLE_TIMEOUT",
+    "JUMP", "LOGIN", "MATCHMAKING", "MOVE", "PLAY", "RATING", "ROOM",
+    "ROOM_CREATE", "ROOM_JOIN", "ROOM_REFUSAL_REASONS", "STATE", "WAITING",
+    "CaptureEntry", "ProtocolError", "dumps", "loads",
     "assigned", "countdown", "error", "game_over", "history", "jump", "login",
     "matchmaking", "move", "play", "rating", "room", "room_create", "room_join",
     "state", "waiting", "decode_capture_log", "decode_snapshot", "encode_snapshot",

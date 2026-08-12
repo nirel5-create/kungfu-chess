@@ -19,7 +19,7 @@ from common.validation import is_displayable
 from server.auth import _authenticate, _current_rating, _read_login, _reserve_username
 from server.history import _send_history
 from server.matchmaking import _play_matchmaking
-from server.rooms import _create_room, _find_or_create_game, _join_room, _read_room_choice
+from server.rooms import _create_room, _join_room, _read_room_choice
 from server.state import Seat
 
 _log = logging.getLogger(__name__)
@@ -57,10 +57,10 @@ async def _join_or_refuse(websocket, registry, game_id, username):  # pragma: no
 # loop knows to re-read a room choice and try again rather than stop.
 _PLAY_TIMED_OUT = object()
 
-# _seat_via_room_or_default's own sentinel, same shape as _PLAY_TIMED_OUT
-# above: a bad room choice (invalid_room_name/room_exists/no_such_room)
-# is the player's own mistake to correct, not a reason to end the
-# session, so the connection stays open for a fresh choice.
+# _seat_via_room's own sentinel, same shape as _PLAY_TIMED_OUT above: a
+# bad room choice (invalid_room_name/room_exists/no_such_room) is the
+# player's own mistake to correct, not a reason to end the session, so
+# the connection stays open for a fresh choice.
 _ROOM_REFUSED = object()
 
 
@@ -91,29 +91,25 @@ async def _seat_via_play(websocket, state, username):  # pragma: no cover
     return matched
 
 
-async def _seat_via_room_or_default(websocket, state, username, room_choice):  # pragma: no cover
-    """The other two ways to a seat: Room (create or join a named game,
-    confirmed with `room` before anything else) or neither (the shared
-    default game, via _find_or_create_game). -> (game_id, color) once
-    joined and `assigned` sent, -> _ROOM_REFUSED for a bad room choice
-    (connection stays open), -> None once refused and closed."""
-    if room_choice is None:
-        game_id = _find_or_create_game(state.registry, state.default_game, username)
+async def _seat_via_room(websocket, state, username, room_choice):  # pragma: no cover
+    """Room: create or join a named game, confirmed with `room` before
+    anything else. -> (game_id, color) once joined and `assigned` sent,
+    -> _ROOM_REFUSED for a bad room choice (connection stays open), ->
+    None once refused and closed."""
+    action, room_id = room_choice
+    if not is_displayable(room_id):
+        _log.warning("refused %s: undisplayable room name %r", username, room_id)
+        return await _refuse_room_choice(websocket, "invalid_room_name")
+    if action == protocol.ROOM_CREATE:
+        game_id = _create_room(state.registry, room_id)
+        refusal = "room_exists"
     else:
-        action, room_id = room_choice
-        if not is_displayable(room_id):
-            _log.warning("refused %s: undisplayable room name %r", username, room_id)
-            return await _refuse_room_choice(websocket, "invalid_room_name")
-        if action == protocol.ROOM_CREATE:
-            game_id = _create_room(state.registry, room_id)
-            refusal = "room_exists"
-        else:
-            game_id = _join_room(state.registry, room_id)
-            refusal = "no_such_room"
-        if game_id is None:
-            _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
-            return await _refuse_room_choice(websocket, refusal)
-        await websocket.send(protocol.dumps(protocol.room(game_id)))
+        game_id = _join_room(state.registry, room_id)
+        refusal = "no_such_room"
+    if game_id is None:
+        _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
+        return await _refuse_room_choice(websocket, refusal)
+    await websocket.send(protocol.dumps(protocol.room(game_id)))
     color = await _join_or_refuse(websocket, state.registry, game_id, username)
     if color is None:
         return None
@@ -123,18 +119,20 @@ async def _seat_via_room_or_default(websocket, state, username, room_choice):  #
 
 async def _seat_for_choice(websocket, state, username, room_choice):  # pragma: no cover
     """Turn `room_choice` into a seat: dispatches between _seat_via_play
-    and _seat_via_room_or_default, and owns the retry loop neither of
-    those two does -- a timed-out Play search or a refused room choice
-    both loop back to reading a fresh choice on the same connection. ->
-    (game_id, color) once joined, -> None once refused and closed."""
+    and _seat_via_room, and owns the retry loop neither of those two does
+    -- a timed-out Play search or a refused room choice both loop back to
+    a fresh read, and giving up on THAT read closes the connection. ->
+    (game_id, color) once joined, -> None once refused/timed-out."""
     while True:
-        if room_choice is not None and room_choice[0] == protocol.PLAY:
+        if room_choice is None:
+            return await _refuse(websocket, protocol.IDLE_TIMEOUT)
+        if room_choice[0] == protocol.PLAY:
             seat = await _seat_via_play(websocket, state, username)
             if seat is _PLAY_TIMED_OUT:
                 room_choice = await _read_room_choice(websocket)
                 continue
             return seat
-        seat = await _seat_via_room_or_default(websocket, state, username, room_choice)
+        seat = await _seat_via_room(websocket, state, username, room_choice)
         if seat is _ROOM_REFUSED:
             room_choice = await _read_room_choice(websocket)
             continue

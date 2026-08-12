@@ -409,6 +409,27 @@ def test_both_players_away_past_the_grace_period_gives_winner_none():
     assert published[0]["winner"] is None
 
 
+def test_a_player_who_left_later_is_not_credited_as_winner_while_still_away():
+    # Both players leave, a few seconds apart. Alice's countdown reaches
+    # the grace period first; bob is ALSO still away at that instant --
+    # his own countdown simply hasn't reached the threshold yet -- so he
+    # must not be declared the winner merely for having left a little
+    # later than alice. Whoever leaves last must not always win.
+    bus = Bus()
+    published = []
+    bus.subscribe(topics.GAME_END, published.append)
+    registry = GameRegistry(_FakeSession, bus=bus)
+    game_id = registry.create()
+    registry.join(game_id, "alice")  # w
+    registry.join(game_id, "bob")    # b
+    registry.leave(game_id, "alice")
+    registry.advance(2000)
+    registry.leave(game_id, "bob")
+    registry.advance(DISCONNECT_GRACE_MS - 2000)  # alice's countdown expires; bob's has not
+    assert len(published) == 1
+    assert published[0]["winner"] is None
+
+
 def test_a_game_already_ended_by_king_capture_does_not_also_auto_resign():
     bus = Bus()
     published = []
