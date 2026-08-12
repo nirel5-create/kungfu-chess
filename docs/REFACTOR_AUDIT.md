@@ -155,3 +155,41 @@ remainder of each file for the same issues.
 split further than the context-object fix: it is already one linear
 responsibility (drive one connection's lifetime), not several, unlike
 `_tick_loop`.
+
+## Stage 3 findings (context objects)
+
+Done: `server.state.ServerState` (+ its own nested `_PlayQueue`, split out
+because `ServerState` itself tripped too-many-instance-attributes at 8
+fields) collapses `_handle_client` 9->2, `_seat_for_choice` 8->4,
+`_run_game_loop` 7->3 (via the new `Seat` namedtuple), `_tick_loop` 7->3,
+`_play_matchmaking` 5->3, `_seat_matched_pair` 5->3 params.
+`client.composition._GameUI` (+ its own nested `_Overlays`, same reason)
+collapses `_play_one_game` 8->3.
+
+Two disables the audit expected to clear here do NOT, on inspection --
+verified against pylint's actual default max-args (5, not the rule's own
+stricter 4), the tool that check.ps1 enforces:
+
+- `client.play._make_on_mouse` (5 params) is called directly by
+  `tests/unit/test_main_on_mouse.py`, which constructs two plain dicts
+  (`{"rect": ...}`, `{"at_ms": ...}`) and passes them positionally.
+  Bundling them into one object would change that call's arity/shape --
+  forbidden outright by the non-negotiable rule. Left as-is.
+- `client.draw._draw_mute_indicator` (6 params) is not itself tested, but
+  was kept matching `_make_on_mouse`'s two-dict shape rather than
+  introducing a second, independent representation of the same
+  rect/pressed-at state that could drift from it.
+
+`server.tick._broadcast_countdown` (6 params) is untouched here on
+purpose: its own params (`game_id`, `game_clients`,
+`current_countdown_seconds`, `last_countdown_seconds`, `dead`) are
+`_tick_loop`-local per-tick bookkeeping, not ServerState collaborators --
+swapping its `registry` param for `state` would not reduce the count.
+Deferred to Stage 4, where `_tick_loop` itself is split and this function's
+real shape can be designed alongside whatever replaces the loop's own
+per-tick locals.
+
+`common.db.update_ratings` and `common.protocol.messages.history` (5
+params each) carry no suppression and are not pylint violations under the
+default threshold this project's gate actually enforces -- left alone
+rather than bundled for a stricter threshold nothing in check.ps1 checks.

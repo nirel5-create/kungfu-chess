@@ -3,6 +3,8 @@ widening the canvas for the side panel, and the mute/room indicators drawn
 into that panel strip.
 """
 
+from collections import namedtuple
+
 import cv2
 import numpy as np
 
@@ -51,28 +53,38 @@ def _widen_canvas(frame, extra_width):  # pragma: no cover
     return widened
 
 
-def _draw_mute_indicator(frame, muted, button_rect, pressed, x, y):  # pragma: no cover
-                          # pylint: disable=too-many-arguments, too-many-positional-arguments
+_ButtonVisual = namedtuple("_ButtonVisual", "rect pressed")
+# A one-shot value carried into a single _draw_mute_indicator call, built
+# fresh by the caller each frame from that frame's own rect/pressed
+# values -- not a second holder for the same state as client.play's
+# mute_rect_holder/mute_pressed_holder dicts (those two stay separate:
+# they persist across frames and are pinned to _make_on_mouse's own
+# signature by tests/unit/test_main_on_mouse.py, which is a different
+# concern from what this draw call needs for one frame).
+
+
+def _draw_mute_indicator(frame, muted, button, pos):  # pragma: no cover
                           # pylint: disable=no-member
-    # Five independent pieces this one small draw needs (mute state, the
-    # button's own geometry and press state, and where to draw) -- the
-    # same reasoning other disables in this file give. cv2.rectangle is a
-    # compiled C extension member pylint cannot introspect.
+    # cv2.rectangle is a compiled C extension member pylint cannot
+    # introspect -- the same false positive other disables in this file
+    # note.
     """Show whether sound is on or off, and the key that toggles it -- 'm'
-    is otherwise undiscoverable. Also draws `button_rect` (client/
+    is otherwise undiscoverable. Also draws `button.rect` (client/
     mute_button.rect) as a visible bordered box, with a brief highlighted
-    fill while `pressed` (client/mute_button.is_pressed) is True -- fixed
-    by live testing: the control worked when clicked but looked like
-    plain status text, with nothing to suggest it was clickable at all.
+    fill while `button.pressed` (client/mute_button.is_pressed) is True --
+    fixed by live testing: the control worked when clicked but looked
+    like plain status text, with nothing to suggest it was clickable at
+    all. `pos` is the (x, y) baseline to draw the status text at.
 
     The rectangle is drawn straight onto frame.img with cv2.rectangle,
     the same pattern this module's own _widen_canvas and client/overlay.
     py's _draw_with_backing already use for the same reason: Img (frozen)
     exposes no rectangle primitive of its own."""
-    left, top, right, bottom = button_rect
+    left, top, right, bottom = button.rect
+    x, y = pos
     channels = frame.img.shape[2]
     white = (255, 255, 255, 255) if channels == 4 else (255, 255, 255)
-    if pressed:
+    if button.pressed:
         highlight = (90, 90, 90, 255) if channels == 4 else (90, 90, 90)
         cv2.rectangle(frame.img, (left, top), (right, bottom), highlight, thickness=-1)
     cv2.rectangle(frame.img, (left, top), (right, bottom), white, thickness=1)

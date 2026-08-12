@@ -43,13 +43,102 @@ _log = logging.getLogger(__name__)
 _CONFIG = Config(cell_size=98, board_offset=(13, 15))
 
 
-def build_client(link, sound_player):  # pragma: no cover, pylint: disable=too-many-locals
+class _Overlays:  # pylint: disable=too-few-public-methods
+    """The two things drawn on top of the rendered board itself, rather
+    than the board or the side panel: the win/loss banner and the
+    disconnect-countdown overlay. Bundled out of _GameUI's own
+    constructor so it stays at 5 parameters, not 6 -- pylint's own
+    threshold, not an arbitrary one."""
+
+    def __init__(self, banner, countdown_overlay):
+        self.banner = banner
+        self.countdown_overlay = countdown_overlay
+
+
+class _GameUI:  # pylint: disable=too-few-public-methods
+    """Everything build_client wires for ONE game, bundled so
+    client.play._play_one_game takes one object instead of six separate
+    parameters."""
+
+    def __init__(self, controller, renderer, bus, overlays, panel):
+        self.controller = controller
+        self.renderer = renderer
+        self.bus = bus
+        self.overlays = overlays
+        self.panel = panel
+
+
+def _build_controller_and_renderer(link):  # pragma: no cover
+    """-> (controller, renderer): the input/render half of one game's
+    stack. The board behind both is a _SnapshotBoard, never a
+    model.Board -- see its own module docstring for why -- so a click
+    decision and everything Renderer paints both always reflect whatever
+    snapshot the server most recently sent."""
+    board = _SnapshotBoard(link)
+    proxy = net.ClientProxy(link.send)
+    controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
+    sprites = SpriteLibrary(_PIECES, cell_size=(_CONFIG.cell_size, _CONFIG.cell_size))
+    animations = AnimationSet(_PIECES)
+    renderer = Renderer(sprites, lambda p: Img().read(p), _BOARD_PNG,
+                        animation=animations.frame)
+    return controller, renderer
+
+
+def _build_panel(link):  # pragma: no cover
+    """-> a ScorePanel positioned in the side panel strip: the mute
+    button's own _MUTE_SLOT_H below _PANEL_TOP, then one ordinary
+    _PANEL_LINE_H for the room indicator (see client.play's draw loop),
+    so ScorePanel's own content starts right after both instead of
+    overlapping them (room used to be drawn on top of ScorePanel's first
+    line -- a bug found by testing Step 7).
+
+    Reads from PanelOverlay(link), not a real GameObserver: the server
+    runs its own GameObserver per game and sends the current log/scores/
+    names in a `history` message, so every client shows the same
+    history -- including one that joined mid-game, which a client-side
+    GameObserver (computing its own log from only what it happened to
+    see) could never do."""
+    board_image = Img().read(_BOARD_PNG)
+    _image_h, image_w = board_image.img.shape[:2]
+    return ScorePanel(PanelOverlay(link), x=image_w + 20,
+                       y=_PANEL_TOP + _MUTE_SLOT_H + _PANEL_LINE_H)
+
+
+def _wire_bus(sound_player, banner):  # pragma: no cover
+    """-> a fresh Bus with event_source/sound_player/banner subscribed to
+    the topics client.play's draw loop publishes to every frame. Adding a
+    future subscriber never touches that loop -- that is the whole point
+    of routing these through a bus instead of direct calls.
+
+    Deliberately NOT bus.subscribe(topics.GAME_END, banner.on_game_end):
+    GameEventSource's own GAME_END payload is always {} (see its module
+    docstring -- it only ever sees snapshots, never who won), which is
+    all on_game_end can show ("GAME OVER", left as-is for whatever else
+    might still want that plain trigger). The server's own `game_over`
+    message names the actual winner by username, so run()'s loop calls
+    banner.show_result directly once that message has actually arrived
+    -- see run() for why it waits rather than reading link.result() from
+    inside a bus callback."""
+    bus = Bus()
+    # promotions is passed explicitly, the same way server.composition
+    # passes king_type=CONFIG.king_type to GameRegistry instead of relying
+    # on its default -- one source of truth (_CONFIG) instead of two
+    # declarations of the same fact.
+    event_source = GameEventSource(bus, promotions=_CONFIG.promotions)
+    bus.subscribe(topics.SNAPSHOT, event_source.on_snapshot)
+    bus.subscribe(topics.SOUND, sound_player.on_sound)
+    bus.subscribe(topics.GAME_START, banner.on_game_start)
+    return bus
+
+
+def build_client(link, sound_player):  # pragma: no cover
     # This is the composition root: the one place that wires every
-    # collaborator together, mirroring app.py's build_game(). The local
-    # count reflects how many independent parts there are to wire, not
-    # tangled logic -- splitting it up would just move names around, not
-    # reduce what this function is responsible for building.
-    """Compose the graphical stack for ONE game and return the parts
+    # collaborator together, mirroring app.py's build_game() -- split
+    # into _build_controller_and_renderer/_build_panel/_wire_bus by
+    # subject, each returning the piece(s) it built rather than writing
+    # into shared locals, which is what let this function's own local
+    # count drop back under the ordinary threshold.
+    """Compose the graphical stack for ONE game and return the _GameUI
     client.play._play_one_game drives. Mirrors app.py's build_game(),
     except the engine is a ClientProxy, the board is a _SnapshotBoard
     instead of a model.Board, there is a ServerLink instead of a
@@ -60,66 +149,24 @@ def build_client(link, sound_player):  # pragma: no cover, pylint: disable=too-m
     survive from game to game on the same connection -- link because
     reopening one per game would look like a duplicate login to the
     server's own check, sound_player because muting should stay muted
-    across games, not reset back to on. Everything else returned here
-    (controller, renderer, bus, banner, countdown_overlay, panel) is
+    across games, not reset back to on. Everything bundled into the
+    returned _GameUI (controller, renderer, bus, overlays, panel) is
     rebuilt fresh every game instead: simpler than auditing each one for
     cross-game state (e.g. Controller.selection potentially showing a
     stale highlight) at negligible cost, since none of them owns anything
     that needs to outlive one game."""
-    board = _SnapshotBoard(link)
-    proxy = net.ClientProxy(link.send)
-    controller = Controller(proxy, BoardMapper(board, _CONFIG), board, _CONFIG)
-
-    board_image = Img().read(_BOARD_PNG)
-    _image_h, image_w = board_image.img.shape[:2]
-
-    sprites = SpriteLibrary(_PIECES, cell_size=(_CONFIG.cell_size, _CONFIG.cell_size))
-    animations = AnimationSet(_PIECES)
-    renderer = Renderer(sprites, lambda p: Img().read(p), _BOARD_PNG,
-                        animation=animations.frame)
-
-    # The mute button's own _MUTE_SLOT_H below _PANEL_TOP, then one
-    # ordinary _PANEL_LINE_H for the room indicator (see the draw loop),
-    # so ScorePanel's own content starts right after both instead of
-    # overlapping them (room used to be drawn on top of ScorePanel's first
-    # line -- a bug found by testing Step 7).
-    #
-    # Reads from PanelOverlay(link), not a real GameObserver: the server
-    # runs its own GameObserver per game and sends the current log/scores/
-    # names in a `history` message, so every client shows the same
-    # history -- including one that joined mid-game, which a client-side
-    # GameObserver (computing its own log from only what it happened to
-    # see) could never do.
-    panel = ScorePanel(PanelOverlay(link), x=image_w + 20,
-                        y=_PANEL_TOP + _MUTE_SLOT_H + _PANEL_LINE_H)
-    banner = BannerOverlay()
-    # Not wired to the bus like banner above: its number comes straight from
-    # link.countdown() every frame in run()'s loop (see CountdownOverlay's
-    # own docstring for why it has no state machine of its own to feed via
-    # a subscriber), not from anything the server-driven SNAPSHOT/GAME_END
+    controller, renderer = _build_controller_and_renderer(link)
+    panel = _build_panel(link)
+    # Not wired to the bus like _wire_bus's own three subscribers: its
+    # number comes straight from link.countdown() every frame in
+    # client.play's own draw loop (see CountdownOverlay's own docstring
+    # for why it has no state machine of its own to feed via a
+    # subscriber), not from anything the server-driven SNAPSHOT/GAME_END
     # topics carry.
+    banner = BannerOverlay()
     countdown_overlay = CountdownOverlay()
-    bus = Bus()
-    # promotions is passed explicitly, the same way server.composition
-    # passes king_type=CONFIG.king_type to GameRegistry instead of relying
-    # on its default -- one source of truth (_CONFIG) instead of two
-    # declarations of the same fact.
-    event_source = GameEventSource(bus, promotions=_CONFIG.promotions)
-
-    bus.subscribe(topics.SNAPSHOT, event_source.on_snapshot)
-    bus.subscribe(topics.SOUND, sound_player.on_sound)
-    bus.subscribe(topics.GAME_START, banner.on_game_start)
-    # Deliberately NOT bus.subscribe(topics.GAME_END, banner.on_game_end):
-    # GameEventSource's own GAME_END payload is always {} (see its module
-    # docstring -- it only ever sees snapshots, never who won), which is
-    # all on_game_end can show ("GAME OVER", left as-is for whatever else
-    # might still want that plain trigger). The server's own `game_over`
-    # message names the actual winner by username, so run()'s loop calls
-    # banner.show_result directly once that message has actually arrived
-    # -- see run() for why it waits rather than reading link.result() from
-    # inside this bus callback.
-
-    return controller, renderer, bus, banner, countdown_overlay, panel
+    bus = _wire_bus(sound_player, banner)
+    return _GameUI(controller, renderer, bus, _Overlays(banner, countdown_overlay), panel)
 
 
 def _room_message_from_dialog(action, room_name):  # pragma: no cover
@@ -209,10 +256,8 @@ def run():  # pragma: no cover
             if link.error() is not None:
                 print(f"Connection refused by server: {link.error()}")
                 return
-            controller, renderer, bus, banner, countdown_overlay, panel = \
-                build_client(link, sound_player)
-            quit_outright = _play_one_game(controller, renderer, link, bus, banner,
-                                            countdown_overlay, panel, sound_player)
+            ui = build_client(link, sound_player)
+            quit_outright = _play_one_game(ui, link, sound_player)
             flow.game_ended()
             if quit_outright:
                 return

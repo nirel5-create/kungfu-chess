@@ -20,6 +20,7 @@ from server.auth import _authenticate, _current_rating, _read_login, _reserve_us
 from server.history import _send_history
 from server.matchmaking import _play_matchmaking
 from server.rooms import _create_room, _find_or_create_game, _join_room, _read_room_choice
+from server.state import Seat
 
 _log = logging.getLogger(__name__)
 
@@ -47,23 +48,96 @@ async def _join_or_refuse(websocket, registry, game_id, username):  # pragma: no
         return None
 
 
-async def _seat_for_choice(websocket, registry, default_game, matchmaker, matchmaking,
-                            db_conn, username, room_choice):  # pragma: no cover
-                            # pylint: disable=too-many-arguments, too-many-positional-arguments
-                            # pylint: disable=too-many-return-statements
+# _seat_via_play's own sentinel: a Play search found nobody, but the
+# connection stays open for it (matchmaking("timeout") already sent) --
+# distinct from None (refused and closed), so _seat_for_choice's own
+# loop knows to re-read a room choice and try again rather than stop.
+_PLAY_TIMED_OUT = object()
+
+
+async def _seat_via_play(websocket, state, username):  # pragma: no cover
+    """Play's own way to a seat: GameRegistry.game_of(username) first, in
+    case this is a reconnect -- a player whose disconnect countdown is
+    still running, or who simply still holds a seat, must return to that
+    seat, not be queued to search for a new opponent while their own
+    held seat sits there waiting for them. Only once game_of finds
+    nothing does this fall through to matchmaking.
+
+    -> (game_id, color) once seated and `assigned` already sent. -> None
+    once refused and closed (AlreadyConnectedError, see
+    _join_or_refuse). -> _PLAY_TIMED_OUT once a search found nobody --
+    matchmaking("timeout") already sent by server.matchmaking.
+    _report_matchmaking_timeout; the connection itself stays open, see
+    that sentinel's own comment."""
+    held_game_id = state.registry.game_of(username)
+    if held_game_id is not None:
+        color = await _join_or_refuse(websocket, state.registry, held_game_id, username)
+        if color is None:
+            return None
+        await websocket.send(protocol.dumps(protocol.assigned(color)))
+        return held_game_id, color
+    matched = await _play_matchmaking(websocket, state, username)
+    if matched is None:
+        return _PLAY_TIMED_OUT
+    return matched
+
+
+async def _seat_via_room_or_default(websocket, state, username, room_choice):  # pragma: no cover
+    """The other two ways to a seat: Room (room_choice is (ROOM_CREATE,
+    name) or (ROOM_JOIN, room_id) -- room_create or room_join picks
+    game_id via _create_room/_join_room instead of _find_or_create_game,
+    and a chosen/created room is confirmed with `room` before anything
+    else, refused the same way if the name is undisplayable, already
+    taken (create), or does not exist (join)) or neither (room_choice is
+    None -- the ordinary shared game, _find_or_create_game).
+
+    -> (game_id, color) once joined and `assigned` already sent. -> None
+    once refused and closed."""
+    if room_choice is None:
+        game_id = _find_or_create_game(state.registry, state.default_game, username)
+    else:
+        action, room_id = room_choice
+        if not is_displayable(room_id):
+            _log.warning("refused %s: undisplayable room name %r", username, room_id)
+            await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
+            await websocket.close()
+            return None
+        if action == protocol.ROOM_CREATE:
+            game_id = _create_room(state.registry, room_id)
+            refusal = "room_exists"
+        else:
+            game_id = _join_room(state.registry, room_id)
+            refusal = "no_such_room"
+        if game_id is None:
+            _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
+            await websocket.send(protocol.dumps(protocol.error(refusal)))
+            await websocket.close()
+            return None
+        await websocket.send(protocol.dumps(protocol.room(game_id)))
+    color = await _join_or_refuse(websocket, state.registry, game_id, username)
+    if color is None:
+        return None
+    await websocket.send(protocol.dumps(protocol.assigned(color)))
+    return game_id, color
+
+
+async def _seat_for_choice(websocket, state, username, room_choice):  # pragma: no cover
     """Turn `room_choice` -- _read_room_choice's own result, or the same
     (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id) /
     (protocol.PLAY, None) shape _run_game_loop returns when a still-
-    connected player picks again mid-session -- into a seat.
+    connected player picks again mid-session -- into a seat. The three
+    ways to get one, from `room_choice`, are _seat_via_play and
+    _seat_via_room_or_default's own job (see their docstrings); this
+    function is only the dispatch between them and the Play-timeout
+    retry loop neither of those two owns itself.
 
     -> (game_id, color) once joined and `assigned` already sent. -> None
     once this connection has already been refused and closed (an `error`
     already sent) -- there is nothing left for the caller to do but stop.
 
     A Play search that times out does NOT close the connection or return
-    None: matchmaking("timeout") has already been sent by
-    server.matchmaking._report_matchmaking_timeout, and this loops back
-    to _read_room_choice for whatever the player picks next on the SAME
+    None (_seat_via_play's own _PLAY_TIMED_OUT): this loops back to
+    _read_room_choice for whatever the player picks next on the SAME
     connection, exactly as a finished game already does via
     _run_game_loop. A player who quits instead of picking again sends
     nothing, so that read simply times out on its own, same as any other
@@ -71,69 +145,20 @@ async def _seat_for_choice(websocket, registry, default_game, matchmaker, matchm
 
     Used identically whether this is the FIRST seat this connection ever
     gets or a LATER one picked after returning home from a previous game
-    on the SAME still-open connection.
-
-    Three ways to get a seat, from `room_choice`:
-    - Play: GameRegistry.game_of(username) first, in case this is a
-      reconnect -- a player whose disconnect countdown is still running,
-      or who simply still holds a seat, must return to that seat, not be
-      queued to search for a new opponent while their own held seat sits
-      there waiting for them. Only once game_of finds nothing does this
-      fall through to matchmaking.
-    - Room: room_create or room_join picks game_id via _create_room/
-      _join_room instead of _find_or_create_game, and a chosen/created
-      room is confirmed with `room` before anything else -- refused the
-      same way if the name is undisplayable, already taken (create), or
-      does not exist (join).
-    - Neither: the ordinary shared game (_find_or_create_game)."""
+    on the SAME still-open connection."""
     while True:
         if room_choice is not None and room_choice[0] == protocol.PLAY:
-            held_game_id = registry.game_of(username)
-            if held_game_id is not None:
-                color = await _join_or_refuse(websocket, registry, held_game_id, username)
-                if color is None:
-                    return None
-                await websocket.send(protocol.dumps(protocol.assigned(color)))
-                return held_game_id, color
-            matched = await _play_matchmaking(websocket, matchmaker, matchmaking,
-                                               db_conn, username)
-            if matched is None:
+            seat = await _seat_via_play(websocket, state, username)
+            if seat is _PLAY_TIMED_OUT:
                 room_choice = await _read_room_choice(websocket)
                 continue
-            return matched
-        if room_choice is None:
-            game_id = _find_or_create_game(registry, default_game, username)
-        else:
-            action, room_id = room_choice
-            if not is_displayable(room_id):
-                _log.warning("refused %s: undisplayable room name %r", username, room_id)
-                await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
-                await websocket.close()
-                return None
-            if action == protocol.ROOM_CREATE:
-                game_id = _create_room(registry, room_id)
-                refusal = "room_exists"
-            else:
-                game_id = _join_room(registry, room_id)
-                refusal = "no_such_room"
-            if game_id is None:
-                _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
-                await websocket.send(protocol.dumps(protocol.error(refusal)))
-                await websocket.close()
-                return None
-            await websocket.send(protocol.dumps(protocol.room(game_id)))
-        color = await _join_or_refuse(websocket, registry, game_id, username)
-        if color is None:
-            return None
-        await websocket.send(protocol.dumps(protocol.assigned(color)))
-        return game_id, color
+            return seat
+        return await _seat_via_room_or_default(websocket, state, username, room_choice)
 
 
-async def _run_game_loop(websocket, registry, clients, game_id,
-                          color, username, observers):  # pragma: no cover
-    # pylint: disable=too-many-arguments, too-many-positional-arguments
-    """Register the connection in `clients`, send the current state and
-    history, then read and apply commands until either the connection
+async def _run_game_loop(websocket, state, seat):  # pragma: no cover
+    """Register the connection in `state.clients`, send the current state
+    and history, then read and apply commands until either the connection
     actually disconnects or the player picks a new room/Play mid-session
     -- shared by every path that ends with a seat in a game (the shared
     default game, a room, or a Play match), so there is exactly one place
@@ -155,11 +180,12 @@ async def _run_game_loop(websocket, registry, clients, game_id,
     right before calling this; a Play match already had it sent by
     server.tick's _seat_matched_pair, before this connection's own
     coroutine even learns which game or color it was matched to."""
-    clients[websocket] = (game_id, username)
+    game_id, color, username = seat
+    state.clients[websocket] = (game_id, username)
     _log.info("%s joined game %s as %s", username, game_id, color)
     try:
-        await _send_state(websocket, registry.session(game_id))
-        await _send_history(websocket, observers, registry, game_id)
+        await _send_state(websocket, state.registry.session(game_id))
+        await _send_history(websocket, state.observers, state.registry, game_id)
         while True:
             try:
                 raw = await websocket.recv()
@@ -178,10 +204,10 @@ async def _run_game_loop(websocket, registry, clients, game_id,
                 return protocol.ROOM_JOIN, message["id"]
             if message_type == protocol.PLAY:
                 return protocol.PLAY, None
-            session = registry.session(game_id)
+            session = state.registry.session(game_id)
             if session is None:
                 continue  # the game's linger period already elapsed
-            if not registry.both_seated(game_id):
+            if not state.registry.both_seated(game_id):
                 # Waiting for an opponent: no move or jump is forwarded to
                 # the engine at all while a seat is still empty, so no
                 # motion can ever start and no capture is ever possible --
@@ -191,13 +217,13 @@ async def _run_game_loop(websocket, registry, clients, game_id,
                 _log.info("ignored %s from %s in game %s: waiting for an opponent",
                            message_type, username, game_id)
                 continue
-            applied = session.submit(message, registry.color_of(game_id, username))
+            applied = session.submit(message, state.registry.color_of(game_id, username))
             _log.info("%s %s from %s in game %s",
                        "applied" if applied else "refused", message.get("type"),
                        username, game_id)
     finally:
-        clients.pop(websocket, None)
-        registry.leave(game_id, username)
+        state.clients.pop(websocket, None)
+        state.registry.leave(game_id, username)
         _log.info("%s left game %s", username, game_id)
         if color in ("w", "b"):
             # A viewer leaving starts no countdown at all (see
@@ -211,18 +237,14 @@ async def _run_game_loop(websocket, registry, clients, game_id,
             _log.info("countdown started for %s in game %s", username, game_id)
 
 
-async def _handle_client(websocket, registry, clients, default_game, db_conn,
-                          matchmaker, matchmaking, connected_usernames,
-                          observers):  # pragma: no cover
-                          # pylint: disable=too-many-arguments
-                          # pylint: disable=too-many-positional-arguments
+async def _handle_client(websocket, state):  # pragma: no cover
     """One coroutine for the whole lifetime of one connection -- not one
     game: read the login username/password the client sends first, then
     loop seating this same connection into game after game, via
     _seat_for_choice and _run_game_loop, until it actually disconnects.
 
     Three things refuse a connection outright -- an `error`, then close,
-    before `clients` or GameRegistry.join is ever touched: an
+    before `state.clients` or GameRegistry.join is ever touched: an
     undisplayable username (is_displayable -- checked first, so a name
     cv2 cannot even draw never reaches a password check or the
     database), a wrong password (_authenticate), or a username already
@@ -239,38 +261,37 @@ async def _handle_client(websocket, registry, clients, default_game, db_conn,
 
     Sends protocol.rating right after a successful login: the home
     dialog shows it immediately, before the player has ever chosen a
-    room -- see client/__main__.py's run(). server.tick sends a fresh one
+    room -- see client.composition.run(). server.tick sends a fresh one
     again whenever a game this connection was part of ends decisively,
-    via the rating_updates hand-off list (see server.composition), so the number
-    shown at home never goes stale after a game changes it."""
+    via the rating_updates hand-off list (see server.composition), so the
+    number shown at home never goes stale after a game changes it."""
     username, password = await _read_login(websocket)
     if not is_displayable(username):
         _log.warning("refused %s: undisplayable username", username)
         await websocket.send(protocol.dumps(protocol.error("invalid_username")))
         await websocket.close()
         return
-    if not _authenticate(db_conn, username, password):
+    if not _authenticate(state.db_conn, username, password):
         _log.warning("refused %s: bad password", username)
         await websocket.send(protocol.dumps(protocol.error("bad_password")))
         await websocket.close()
         return
-    if not _reserve_username(connected_usernames, username):
+    if not _reserve_username(state.connected_usernames, username):
         _log.warning("refused %s: already connected", username)
         await websocket.send(protocol.dumps(protocol.error("already_connected")))
         await websocket.close()
         return
     try:
-        await websocket.send(protocol.dumps(protocol.rating(_current_rating(db_conn, username))))
+        rating_msg = protocol.rating(_current_rating(state.db_conn, username))
+        await websocket.send(protocol.dumps(rating_msg))
         room_choice = await _read_room_choice(websocket)
         while True:
-            seat = await _seat_for_choice(websocket, registry, default_game, matchmaker,
-                                           matchmaking, db_conn, username, room_choice)
-            if seat is None:
+            result = await _seat_for_choice(websocket, state, username, room_choice)
+            if result is None:
                 return
-            game_id, color = seat
-            room_choice = await _run_game_loop(websocket, registry, clients, game_id, color,
-                                                username, observers)
+            game_id, color = result
+            room_choice = await _run_game_loop(websocket, state, Seat(game_id, color, username))
             if room_choice is None:
                 return
     finally:
-        connected_usernames.discard(username)
+        state.connected_usernames.discard(username)

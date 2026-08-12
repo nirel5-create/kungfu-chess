@@ -14,6 +14,7 @@ from common.registry import GameRegistry
 from server.connection import _handle_client
 from server.ratings import _connect_db, _update_ratings_on_game_end
 from server.session import CONFIG, build_session
+from server.state import ServerState
 from server.tick import _tick_loop
 
 LOG_PATH = "logs/server.log"
@@ -82,18 +83,12 @@ async def main():  # pragma: no cover
     # correctly (that comes from the engine) but its own winner lookup
     # would find no matching king and report winner=None forever.
     registry = GameRegistry(build_session, bus=bus, king_type=CONFIG.king_type)
-    clients = {}  # websocket -> (game_id, username)
-    default_game = {"id": None}  # see server.rooms._find_or_create_game
     matchmaker = MatchMaker()  # see server.matchmaking._play_matchmaking
-    matchmaking = {}  # username -> (websocket, future, rating); see server.matchmaking
-    connected_usernames = set()  # see server.auth._reserve_username
-    observers = {}  # game_id -> CaptureLog; see server.history._observer_for
+    state = ServerState(registry, db_conn, matchmaker)
 
     async def handler(websocket):
-        await _handle_client(websocket, registry, clients, default_game, db_conn,
-                              matchmaker, matchmaking, connected_usernames, observers)
+        await _handle_client(websocket, state)
 
     async with websockets.serve(handler, _HOST, _PORT):
         _log.info("listening on ws://%s:%d", _HOST, _PORT)
-        await _tick_loop(registry, clients, ended_games, matchmaker, matchmaking,
-                          observers, rating_updates)
+        await _tick_loop(state, ended_games, rating_updates)
