@@ -24,16 +24,11 @@ from common.protocol.snapshot import encode_capture_entry, encode_snapshot
 
 
 def login(username, password=""):
-    """`username` is the free-text name the player typed at the client's shell
-    prompt before the window opened. Sent once, as the very first message on
-    a new connection.
-
-    `password` is sent as the player typed it, in the clear, over this local
-    WebSocket -- there is no TLS here, and a real deployment would need it
-    (wss://) before this stopped being a real exposure. The server never
-    stores it: it is hashed (common/db.py) the moment it arrives and
-    discarded. Defaults to "" so existing single-argument callers (and
-    tests) keep working."""
+    """`username` is the free-text name the player typed at the client's
+    shell prompt before the window opened. Sent once, as the first
+    message on a new connection. `password` is sent as typed, in the
+    clear, over this local WebSocket -- a real deployment would need
+    TLS (wss://) first. Never stored: hashed (common/db.py) on arrival."""
     return {"type": LOGIN, "username": username, "password": password}
 
 
@@ -80,8 +75,7 @@ def room_join(room_id):
 
 def state(snapshot):
     """`snapshot` is a `GameSnapshot`, encoded here into the full board
-    state. Per the full-snapshot decision (this module's own docstring),
-    every `state` message is the complete truth, never a delta."""
+    state -- the complete truth, never a delta."""
     return {"type": STATE, "snapshot": encode_snapshot(snapshot)}
 
 
@@ -102,22 +96,13 @@ def countdown(seconds):
 
 def game_over(winner, winner_username=None, rating=None):
     # pylint: disable=redefined-outer-name
-    # `rating` here is this function's own, unrelated parameter (a
-    # {"you":..., "delta":...} dict, see its own docstring below) -- it
-    # only shares a name with the module-level rating() builder below,
-    # never calls or is called by it.
-    """`winner` is `"w"`, `"b"`, or `None` -- there is no draw: an
-    inconclusive game (e.g. both players disconnected) reports `None`,
-    which is not scored as one either.
-
-    `winner_username` is the display name for a decisive win, resolved by
-    the server from the game's seats -- `None` whenever `winner` is `None`
-    or the winning seat's username is not known.
-
-    `rating`, when present, is this client's own result: `{"you": <new
-    rating>, "delta": <signed change>}`, where `delta` has ALREADY been
-    applied and persisted (so `you == old + delta`). `None` when there is
-    no rating to report. Once sent, the game is finished."""
+    # `rating` is this function's own parameter, unrelated to the
+    # module-level rating() builder below.
+    """`winner` is "w", "b", or None -- no draw: an inconclusive game
+    reports None, not scored either. `winner_username` is the display
+    name for a decisive win, resolved by the server from the game's
+    seats. `rating`, when present, is `{"you": <new rating>, "delta":
+    <signed change>}`, already applied and persisted."""
     return {"type": GAME_OVER, "winner": winner,
             "winner_username": winner_username, "rating": rating}
 
@@ -133,19 +118,10 @@ def matchmaking(status):
 
 def history(white_name, black_name, white_score, black_score, log):
     """The current move log, scores, and display names for a game, sent
-    whenever any of them changes and once, immediately, when a connection
-    joins or reconnects. Every client watching the same game sees the same
-    thing, computed once by the server's own common.capture_log.CaptureLog.
-
-    white_name/black_name are the CURRENT username seated at each color, or
-    "Player 1"/"Player 2" for a seat nobody has taken yet. white_score/
-    black_score are each side's running total (the summed cost of captured
-    pieces).
-
-    `log` is a sequence of CaptureEntry (capturer_color, victim_token,
-    cost, clock_ms), oldest first -- see decode_capture_log for the
-    reverse. Sent as the FULL log every time, never a delta, for the same
-    resync reason this module's own docstring gives for `state`."""
+    whenever any of them changes and once when a connection joins or
+    reconnects, computed once by the server's own CaptureLog so every
+    client watching sees the same thing. white_name/black_name default
+    to "Player 1"/"Player 2"; `log` is sent in FULL, oldest first, never a delta."""
     return {
         "type": HISTORY,
         "white_name": white_name,
@@ -181,10 +157,9 @@ def error(reason):
 
 
 def waiting(is_waiting):
-    """`is_waiting` is whether this game currently has an empty "w" or "b"
-    seat -- fixed by live testing: a solo player could otherwise walk a
-    piece across an unopposed board and capture the empty side's king for
-    a free, repeatable win, with the board simply looking frozen. Sent
-    whenever this value CHANGES, unsolicited, so a client can show "Waiting
-    for an opponent" for exactly as long as it is actually true."""
+    """`is_waiting` is whether this game currently has an empty "w" or
+    "b" seat: without it, a solo player could walk a piece across an
+    unopposed board and capture the empty side's king for a free,
+    repeatable win. Sent whenever this value CHANGES, so a client can
+    show "Waiting for an opponent" for exactly as long as it is true."""
     return {"type": WAITING, "waiting": is_waiting}

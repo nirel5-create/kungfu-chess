@@ -32,15 +32,11 @@ def _encode_piece(piece):
 
 
 def decode_snapshot(data):
-    """dict -> GameSnapshot. Rebuilds the two traps JSON introduces: `pieces`
-    comes back as a tuple of PieceView (not a list of list), and
-    `board_offset` comes back as a tuple (not a list), so equality with a
-    snapshot built by the engine holds field for field.
-
-    Any structurally bad input -- not a dict, a missing field, or a malformed
-    `selected_cell`/`board_offset` -- raises ProtocolError(BAD_PAYLOAD) rather
-    than a raw KeyError/TypeError, upholding this module's promise that bad
-    input never crashes the server."""
+    """dict -> GameSnapshot. Rebuilds the two traps JSON introduces:
+    `pieces` comes back as a tuple of PieceView, and `board_offset` as a
+    tuple, not lists, so equality with an engine-built snapshot holds
+    field for field. Structurally bad input raises ProtocolError
+    (BAD_PAYLOAD) rather than a raw KeyError/TypeError."""
     if not isinstance(data, dict):
         raise ProtocolError(ProtocolError.BAD_PAYLOAD)
     try:
@@ -90,10 +86,9 @@ def encode_capture_entry(entry):
 
 
 def decode_capture_log(data):
-    """list of encoded entries (see messages.history's own docstring) ->
-    tuple of CaptureEntry, oldest first. Raises ProtocolError(BAD_PAYLOAD)
-    on anything malformed, the same promise decode_snapshot already keeps
-    for its own field."""
+    """list of encoded capture-log entries -> tuple of CaptureEntry,
+    oldest first. Raises ProtocolError(BAD_PAYLOAD) on anything
+    malformed."""
     try:
         return tuple(
             CaptureEntry(capturer_color=item["capturer_color"],

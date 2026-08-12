@@ -1,24 +1,13 @@
-"""Derives the events slide 1 needs (sound, move log, score, start/end) from
-consecutive GameSnapshots.
+"""Derives the events the UI needs (sound, move log, score, start/end) from
+consecutive GameSnapshots, published on the bus.
 
-The server sends full snapshots, not events (Server_Design.md section 2), so
-whoever wants events computes them from state, on the side that is looking.
-That is the client -- specifically this module, subscribed to
-topics.SNAPSHOT.
+The server sends full snapshots, not events, so this module computes events
+client-side by diffing each snapshot against the one before it.
 
-What this module owns: turning two consecutive snapshots into the events
-slide 1 needs, and publishing them on the bus.
-What it does NOT own: playing sound, drawing, sockets, or scoring -- scoring
-is GameObserver's job, and GameObserver stays untouched (it is frozen,
-in view/, and becomes a bus subscriber by being wired in client.py, not by
-being edited).
-
-On the overlap with GameObserver: the observer also notices vanished pieces,
-to compute score. This module notices them too, to decide the "capture"
-sound name. That is a small duplication -- both walk the same two piece
-lists -- but the alternative (routing sound through the observer) would give
-the score keeper a second, unrelated job. A two-line diff of duplication is
-cheaper than that coupling.
+Sound selection and GameObserver's score tracking both scan the same two
+piece lists for vanished pieces. That duplication is deliberate: routing
+sound through GameObserver would give the score keeper a second, unrelated
+job. A few lines of duplication are cheaper than that coupling.
 """
 
 from collections import Counter
@@ -38,19 +27,11 @@ class GameEventSource:  # pylint: disable=too-few-public-methods
     # A bus subscriber is meant to have exactly one public entry point --
     # the handler it is subscribed with -- so one public method is the
     # design, not a gap; the real logic lives in the private helpers below.
-    """Subscribe on_snapshot to topics.SNAPSHOT. Publishes GAME_START once,
-    on the very first snapshot; then, for every later snapshot, at most one
-    SOUND (game_over beats promotion beats capture beats move -- the most
-    informative event for that frame wins, never more than one per frame),
-    plus MOVE_LOG/SCORE_UPDATE/GAME_END as their own triggers fire.
-
-    Detects a *transition*, not a state: a piece in flight is reported by
-    the engine at its logical (pre-move) cell throughout the whole glide
-    (see engine.game.GameEngine.snapshot's own docstring) and only jumps to
-    its destination cell in the one snapshot where it arrives. So comparing
-    cells between consecutive snapshots already fires exactly once per move,
-    with no extra bookkeeping needed to avoid a per-frame stutter.
-    """
+    """Subscribes on_snapshot to topics.SNAPSHOT: publishes GAME_START once,
+    then at most one SOUND per snapshot (game_over beats promotion beats
+    capture beats move), plus MOVE_LOG/SCORE_UPDATE/GAME_END as triggered.
+    Diffs consecutive snapshots rather than piece state directly, since a
+    piece in flight sits at its pre-move cell until it lands."""
 
     def __init__(self, bus, promotions=None):
         """bus -- the Bus to publish on.
@@ -118,15 +99,11 @@ class GameEventSource:  # pylint: disable=too-few-public-methods
 
     @staticmethod
     def _captured(prev, curr):
-        """Whether the total piece count dropped. A capture always removes
-        exactly one piece from the board, no matter which cell it vanished
-        from (the capturing piece moves onto it, so no single cell reliably
-        shows "a piece left and none arrived") -- but a per-token-kind count
-        (GameObserver's approach, for scoring) is the wrong tool here: a
-        promotion changes a piece's kind in place, which also drops the
-        pre-promotion token's count without any capture happening. Total
-        piece count is immune to that -- a promotion does not change how
-        many pieces are on the board, only a capture does."""
+        """Whether the total piece count dropped -- the capture signal. A
+        per-token-kind count (GameObserver's approach) would be wrong here:
+        promotion also drops its pre-promotion token's count without a
+        capture happening. Total piece count is immune, since promotion
+        never changes how many pieces are on the board."""
         return len(curr.pieces) < len(prev.pieces)
 
     @staticmethod
@@ -142,16 +119,9 @@ class GameEventSource:  # pylint: disable=too-few-public-methods
     def _promoted(self, prev, curr):
         """Whether some (from_token -> to_token) pair in `promotions`
         happened: from_token's count dropped and to_token's count rose.
-
-        NOT "some cell holds the same color but a different kind than
-        before" -- checked against a real engine, that never matches: on
-        promotion the pawn arrives at its DESTINATION cell already
-        promoted, so the cell and the kind change in the very same
-        transition (e.g. ("w","P",1,0) becomes ("w","Q",0,0)). There is no
-        snapshot pair where one cell shows both the old and the new kind.
-        Token counts are unaffected by which cell anything sits on, which
-        is exactly what makes them the right tool here, the same reason
-        _captured uses a whole-board count instead of a per-cell one."""
+        Token counts, not "a cell's kind changed", because a promoted pawn
+        already shows its new kind at its new cell in the same snapshot --
+        no pair of snapshots ever shows one cell holding both kinds."""
         before = Counter(f"{p.color}{p.kind}" for p in prev.pieces)
         after = Counter(f"{p.color}{p.kind}" for p in curr.pieces)
         for from_token, to_token in self._promotions.items():
@@ -162,21 +132,11 @@ class GameEventSource:  # pylint: disable=too-few-public-methods
 
     @staticmethod
     def _jumped(prev, curr):
-        """Whether some piece just transitioned INTO the STATE_JUMPING state
-        -- the transition, not the state itself: a jump never changes a
-        piece's cell (only its state, to STATE_JUMPING for the jump's
-        duration and then to STATE_RESTING_SHORT -- see model.snapshot and
-        engine.game), so it sits in STATE_JUMPING for many consecutive
-        frames while it re-arms. Checking
-        the state alone would fire this sound every one of those frames
-        instead of once, the same stutter a plain state comparison would
-        have caused for promotion (see _promoted's docstring) and moves are
-        already protected from by comparing cells rather than pieces.
-
-        A jump's own cell not changing is exactly what makes it usable as
-        that piece's identity here: the piece at (row, col) in `curr` is
-        the same piece that was at (row, col) in `prev`, if anything was
-        there at all."""
+        """Whether some piece just transitioned into STATE_JUMPING -- checked
+        as a transition, not the state itself, since a piece sits in
+        STATE_JUMPING for many frames while it re-arms, and a plain state
+        check would fire every frame. A jump never moves a piece's cell, so
+        (row, col) reliably identifies the same piece across snapshots."""
         before_state = {(p.row, p.col): p.state for p in prev.pieces}
         return any(
             p.state == STATE_JUMPING and before_state.get((p.row, p.col)) != STATE_JUMPING

@@ -3,23 +3,16 @@ algorithm: compare token counts between two consecutive GameSnapshots -- a
 piece present before and gone now was captured, whatever cell it vanished
 from -- and score it to the side that took it.
 
-Why a clone and not an import: server.py needs exactly this algorithm
-(Step 11's per-game history broadcast), but view/ is the client's OpenCV
-rendering stack and is deliberately not part of the server's Docker image
-(see Dockerfile's own comment) -- `from view.observer import GameObserver`
-broke the server in Docker with ModuleNotFoundError at startup, every
-time, in the container only (the unit suite never catches this, since
-view/ exists on the host). view/observer.py is also frozen and cannot be
-changed to live somewhere both sides can import from. So, the same as
-common/protocol.py's own CaptureEntry, this is a wire/server-side
-equivalent of a client-only class, not an import across that boundary.
+Why a clone and not an import: view/ is the client's OpenCV rendering
+stack and is deliberately not part of the server's Docker image, so
+`from view.observer import GameObserver` breaks the server in the
+container with ModuleNotFoundError at startup. view/observer.py is also
+frozen and cannot be moved somewhere both sides can import from.
 
 Deliberately narrower than GameObserver: no name_of, no names at all.
 server.py computes display names separately, fresh from
-GameRegistry.seats on every broadcast (see its own _seat_names), never
-from an observer -- GameObserver's own names are fixed at construction
-with no setter, which does not fit a name that can change after the game
-already has one. There is nothing here for a name to be fixed against.
+GameRegistry.seats every broadcast, since a username can change after
+construction -- GameObserver's own names are fixed with no setter.
 """
 
 from collections import Counter
@@ -29,8 +22,8 @@ from common.protocol import CaptureEntry
 
 class CaptureLog:
     """Tracks captures and each side's running score across consecutive
-    GameSnapshots -- see this module's own docstring for why this exists
-    alongside view.observer.GameObserver rather than importing it."""
+    GameSnapshots -- a server-side clone of view.observer.GameObserver,
+    kept independent of the client's rendering stack."""
 
     def __init__(self, config):
         """config -- used only to read piece costs and colours (the same

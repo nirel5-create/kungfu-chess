@@ -25,11 +25,10 @@ _SUMMARY_INTERVAL_MS = 10_000
 
 
 def _winner_username(seats, winner):
-    """-> the username sitting in the `winner` seat, or None if there is no
-    winner (a game with no result reports no name, not a color -- see
-    protocol.game_over's own docstring) or, defensively, if the winning
-    color was somehow never seated -- should not happen, since `winner` can
-    only ever be a color GameRegistry itself found seated."""
+    """-> the username sitting in the `winner` seat, or None if there is
+    no winner, or (defensively) if the winning color was somehow never
+    seated -- should not happen, since `winner` can only ever be a color
+    GameRegistry itself found seated."""
     if winner is None:
         return None
     return next((user for user, color in seats.items() if color == winner), None)
@@ -37,15 +36,10 @@ def _winner_username(seats, winner):
 
 class _TickState:  # pylint: disable=too-few-public-methods
     """Bookkeeping that persists from one tick to the next: the running
-    tick count (CaptureLog.observe's own elapsed-ms, and the periodic
-    summary), how long since the last summary was logged, and what was
-    last sent per game_id (waiting, history) or (game_id, username)
-    (countdown) -- the send-on-change idiom _tick_loop's own docstring
-    explains for all three. `current_countdown_seconds` is the one
-    exception: rebuilt empty at the start of every tick (see _tick_loop),
-    it becomes `last_countdown_seconds` only once the tick's own
-    broadcasts are done, the same two-dict handoff the original inline
-    loop used before this class existed."""
+    tick count, time since the last summary, and what was last sent per
+    game_id or (game_id, username), for the send-on-change broadcasts
+    below. `current_countdown_seconds` is rebuilt empty each tick and
+    becomes `last_countdown_seconds` once that tick's broadcasts are done."""
 
     def __init__(self):
         self.tick_count = 0
@@ -57,13 +51,11 @@ class _TickState:  # pylint: disable=too-few-public-methods
 
 
 class _GameBroadcast:  # pylint: disable=too-few-public-methods
-    """The three things every one of a tick's per-game broadcasts needs:
-    which game, who is currently connected to it, and the shared
-    dead-socket accumulator for the whole tick (not just this game) --
-    bundled so each broadcast function below takes one object instead of
-    threading all three through separately, and so the send-to-everyone-
-    move-failures-into-dead sequence (rule 6: it used to appear five
-    times, once per message type) is written once, as a method."""
+    """The three things every per-game broadcast needs: which game, who
+    is currently connected to it, and the shared dead-socket accumulator
+    for the whole tick -- bundled so each broadcast function below takes
+    one object, and the send-to-everyone-move-failures-into-dead sequence
+    is written once, as a method."""
 
     def __init__(self, game_id, game_clients, dead):
         self.game_id = game_id
@@ -85,12 +77,10 @@ async def _broadcast_state(session, broadcast):  # pragma: no cover
 
 
 async def _broadcast_waiting_if_changed(state, broadcast, tick_state):  # pragma: no cover
-    """Broadcast a game's waiting-for-opponent status whenever it
-    CHANGES -- most ticks a game's seats do not change at all. Display
-    only: server.connection._run_game_loop is what actually refuses to
-    forward a move/jump while a seat is empty, so a client that somehow
-    missed this message still cannot exploit the gap, only fail to see
-    why nothing moves."""
+    """Broadcast a game's waiting-for-opponent status whenever it changes.
+    Display only: server.connection already refuses to forward a
+    move/jump while a seat is empty, so a client that missed this message
+    can only fail to see why nothing moves, never exploit the gap."""
     is_waiting = not state.registry.both_seated(broadcast.game_id)
     if tick_state.last_waiting_sent.get(broadcast.game_id) == is_waiting:
         return
@@ -99,13 +89,11 @@ async def _broadcast_waiting_if_changed(state, broadcast, tick_state):  # pragma
 
 
 async def _broadcast_game_over_if_ended(ended_by_game_id, broadcast):  # pragma: no cover
-    """Broadcast the outcome once a game ends: `ended_by_game_id` is
-    built fresh each tick from `ended_games`, a plain list a GAME_END bus
-    subscriber appends its payload to (see server.composition) --
-    GameRegistry.advance publishes GAME_END synchronously, so by the
-    time this runs, every game that just ended this tick is already in
-    it. Sent once per game, to whichever clients are connected to it at
-    that moment -- the same clients its `state` broadcast just went to."""
+    """Broadcast the outcome once a game ends, using this tick's own
+    GAME_END payloads: GameRegistry.advance publishes them synchronously,
+    so every game that ended this tick is already in `ended_by_game_id`.
+    Sent once per game, to whichever clients are connected to it right
+    now."""
     ended_payload = ended_by_game_id.get(broadcast.game_id)
     if ended_payload is None:
         return
@@ -115,14 +103,11 @@ async def _broadcast_game_over_if_ended(ended_by_game_id, broadcast):  # pragma:
 
 
 async def _broadcast_history_if_changed(state, broadcast, session, tick_state):  # pragma: no cover
-    """Run this game's own CaptureLog and broadcast its current
-    log/scores/names whenever they change: `observer.observe` runs every
-    tick, unconditionally, same as the observer's own docstring expects
-    ("called as often or as rarely as the view likes"), but the actual
-    `history` message is only sent when `(log length, white_name,
-    black_name)` differs from what was last sent -- log length alone is
-    enough to also cover score, since a score only ever changes together
-    with a new log entry."""
+    """Run this game's CaptureLog every tick, but only broadcast its
+    log/scores/names when `(log length, white_name, black_name)` differs
+    from what was last sent -- log length alone is enough to also cover
+    score, since a score only ever changes together with a new log
+    entry."""
     observer = _observer_for(state.observers, broadcast.game_id)
     observer.observe(session.snapshot(), tick_state.tick_count * _TICK_MS)
     white_name, black_name = _seat_names(state.registry.seats(broadcast.game_id))
@@ -135,13 +120,10 @@ async def _broadcast_history_if_changed(state, broadcast, session, tick_state): 
 
 
 async def _broadcast_countdown(state, broadcast, tick_state):  # pragma: no cover
-    """Send protocol.countdown(seconds) for each away player in this
-    game -- whole seconds, not milliseconds, and only when the value
-    actually changed since the last tick, the same "send on change, not
-    on every tick" reasoning _SUMMARY_INTERVAL_MS already uses.
-
-    Never called for a game that has already ended -- see
-    _broadcast_one_game's own docstring for why."""
+    """Send protocol.countdown(seconds) for each away player, in whole
+    seconds and only when the value changed since the last tick. Never
+    called for a game that has already ended, so a last-tick countdown
+    never flashes over the GAME OVER banner."""
     for username, ms_left in state.registry.countdown_ms(broadcast.game_id).items():
         seconds = -(-ms_left // 1000)  # ceiling: show 20..1, never a 0 flash
         key = (broadcast.game_id, username)
@@ -155,15 +137,9 @@ async def _broadcast_one_game(state, game_id, ended_by_game_id,
                                tick_state, dead):  # pragma: no cover
     """Every broadcast one game_id gets in one tick: state, waiting (on
     change), game-over (once), history (on change), and -- unless the
-    game has already ended -- the disconnect countdown. A no-op if the
-    game's linger period already elapsed (registry.session returns None).
-
-    The game_over check before the countdown broadcast exists because a
-    game can end on the exact same tick an away player's own countdown
-    reaches 0 (auto-resign): without it, that last countdown(0) still
-    goes out alongside game_over, flashing "0s" over the GAME OVER
-    banner for a game that is already decided -- there is nothing left
-    to count down toward once it is."""
+    game already ended -- the countdown, skipped there because a game can
+    end the exact same tick an away player's countdown reaches 0. A no-op
+    if the game's linger period already elapsed."""
     session = state.registry.session(game_id)
     if session is None:
         return
@@ -179,14 +155,11 @@ async def _broadcast_one_game(state, game_id, ended_by_game_id,
 
 
 async def _advance_matchmaking(state):  # pragma: no cover
-    """Run one tick of Play's matchmaking: matchmaker.advance(_TICK_MS),
-    exactly like registry.advance -- time stays explicit here too. Every
-    pair gets a fresh game (_seat_matched_pair); every timeout gets told
-    (_report_matchmaking_timeout). Both also resolve that connection's
-    own _play_matchmaking future, which is the actual hand-off back to
-    _handle_client's waiting coroutine -- Bus-style pub/sub was not used
-    here because there is exactly one interested party per outcome (the
-    seeker's own connection), not an open set of subscribers."""
+    """Run one tick of Play's matchmaking: every pair gets a fresh game,
+    every timeout gets told, and both resolve that connection's own
+    _play_matchmaking future -- the actual hand-off back to the waiting
+    coroutine. A direct call rather than the bus, since there is exactly
+    one interested party per outcome."""
     pairs, timed_out = state.play_queue.matchmaker.advance(_TICK_MS)
     for user_a, user_b in pairs:
         await _seat_matched_pair(state, user_a, user_b)
@@ -197,14 +170,9 @@ async def _advance_matchmaking(state):  # pragma: no cover
 async def _push_rating_updates(state, rating_updates, dead):  # pragma: no cover
     """Push a fresh rating to any still-connected player named in
     `rating_updates` -- a plain list of (username, new_rating) pairs a
-    GAME_END subscriber appends to (see server.composition), mirroring
-    `ended_games`' own hand-off pattern. A reverse username -> websocket
-    scan over `state.clients`: the affected players are still in
-    `state.clients`, under whichever game_id they are in now, for as
-    long as server.connection._run_game_loop's own command loop keeps
-    running on their connection (until they disconnect or pick a new
-    game), which already outlives the one tick this list is drained
-    within."""
+    GAME_END subscriber appends to. A reverse username -> websocket scan
+    over `state.clients`, since that is the only place a still-connected
+    player's socket can be found."""
     for username, new_rating in rating_updates:
         websocket = next((ws for ws, (_gid, user) in state.clients.items()
                            if user == username), None)
@@ -218,18 +186,10 @@ async def _push_rating_updates(state, rating_updates, dead):  # pragma: no cover
 
 def _log_summary_if_due(state, tick_state):  # pragma: no cover
     """Log a summary every _SUMMARY_INTERVAL_MS (tick count, live games,
-    connected clients) -- never the per-tick broadcast itself; that is
-    ~33 lines/second and would make the log file useless within seconds.
-
-    Known gap, seen live in this summary (live_games=0,
-    connected_clients=3): a client is never told its game was removed
-    after the linger period elapses (GameRegistry drops it silently, see
-    common/registry's GAME_END_LINGER_MS), so `state.clients` can outlive
-    every game_ids() entry it points at. Those clients stay connected,
-    attached to a game_id registry.session() now returns None for, and
-    see a frozen board (_broadcast_one_game simply has nothing to send
-    them). Not fixed here -- noted because this summary is what makes it
-    visible at all."""
+    connected clients) -- never the per-tick broadcast itself, which
+    would flood the log within seconds. Known gap this can surface: a
+    client is never told its game was removed after the linger period,
+    so it can stay connected to a game_id that no longer exists."""
     tick_state.ms_since_summary += _TICK_MS
     if tick_state.ms_since_summary < _SUMMARY_INTERVAL_MS:
         return
@@ -250,22 +210,11 @@ def _prune_stale_games(state, tick_state):  # pragma: no cover
 
 
 async def _tick_loop(state, ended_games, rating_updates):  # pragma: no cover
-    """Advance every game by a fixed step on a fixed interval, then push
-    each game's own broadcasts (_broadcast_one_game: state, waiting,
-    game-over, history, countdown) only to the clients sitting in that
-    game. Every client shares one game by default; a Room or a Play
-    match does not, and broadcasting per-game already handles that. Also
-    runs Play's matchmaking (_advance_matchmaking), pushes fresh ratings
-    (_push_rating_updates), logs the periodic activity summary
-    (_log_summary_if_due), and prunes bookkeeping for games that ended
-    and were removed (_prune_stale_games) -- see each function's own
-    docstring for what it does and why.
-
-    A client whose send fails (it dropped the connection) is collected
-    into `dead` for the whole tick (every broadcast function above adds
-    to the same set, via _GameBroadcast.send) and removed from
-    `state.clients` once, at the end of the tick, rather than stopping
-    any single broadcast for everyone else."""
+    """Advance every game by a fixed step, then push each game's own
+    broadcasts only to the clients sitting in that game; also runs Play's
+    matchmaking, pushes fresh ratings, and logs the periodic summary. A
+    client whose send fails is collected into `dead` for the whole tick,
+    so one failure does not stop any other client's broadcast."""
     tick_state = _TickState()
     while True:
         await asyncio.sleep(_TICK_MS / 1000)

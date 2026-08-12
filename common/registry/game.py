@@ -7,13 +7,9 @@ holder it keeps one of per live game.
 class AlreadyConnectedError(Exception):
     """Raised by GameRegistry.join() when `username` already has a LIVE
     connection to a game -- a second, simultaneous connection under the
-    same name, not a reconnect. This used to be handled by silently
-    seating the second connection as "viewer": that stopped the second
-    window from controlling the first one's pieces, but gave the player
-    at that second window no explanation -- they would just find they
-    could not move anything and have to guess why. Raising a named
-    exception lets the caller (server.py) tell them instead: a refusal
-    the player can read beats a silent demotion they must deduce."""
+    same name, not a reconnect. Raising a named exception lets the
+    caller (server.py) tell the player why, rather than silently seating
+    them as an unresponsive "viewer" with nothing to explain it."""
 
 
 class _Game:  # pylint: disable=too-few-public-methods

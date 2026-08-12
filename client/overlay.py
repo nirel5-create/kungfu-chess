@@ -1,26 +1,22 @@
-"""A short start/end banner, drawn on top of the finished frame.
+"""A start/end banner and connection-status overlay, drawn on top of the
+finished frame rather than by the frozen Renderer itself.
 
-Renderer is frozen, so this never draws inside it -- only over its output,
-the same way ScorePanel already does.
+Text needs a solid backing rectangle to stay readable over any board
+square color, and Img (frozen) exposes no rectangle primitive of its
+own, so this module writes straight to frame.img (a plain, mutable numpy
+array) with cv2.rectangle, then layers text over it with Img.put_text.
 
-What this module owns: a small state machine (what text is showing, and
-until when) and painting that text onto a frame -- with Img.put_text for
-the text itself, and a direct cv2.rectangle call on frame.img for the dark
-backing behind it, since Img (frozen, view/img.py) exposes no rectangle
-primitive of its own. Writing straight to frame.img is the same thing
-client.py's _widen_canvas already does for the same reason (Img's public
-`.img` is a plain, directly-assignable/mutable numpy array).
-What it does NOT own: deciding when the game started or ended -- that is
-client.events.GameEventSource -- or anything about the renderer.
+This owns the state machine (what text is showing, and until when) and
+painting it -- not deciding when the game started or ended, which is
+client.events.GameEventSource's job.
 """
 
 import cv2
 
 # cv2 is a compiled C extension, so pylint cannot introspect its members:
 # FONT_HERSHEY_SIMPLEX, getTextSize and rectangle below all exist and work
-# at runtime (client.py's run() disables the same false positive for its
-# own cv2 members, with the same reasoning). Every no-member warning in
-# this file from here on is that false positive, not a real one.
+# at runtime. Every no-member warning in this file from here on is that
+# false positive, not a real one.
 # pylint: disable=no-member
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _FONT_SIZE = 1.5
@@ -30,10 +26,9 @@ _BACKING_PADDING = 16
 
 
 def _draw_with_backing(frame, text, x, y, color):
-    """Paint `text` at (x, y) over a filled dark backing rectangle sized to
-    it -- shared by BannerOverlay and CountdownOverlay below, since both
-    need the same readable-over-any-square-color trick (see this module's
-    docstring)."""
+    """Paint `text` at (x, y) over a filled dark backing rectangle sized
+    to it, so it stays readable over any board square color. Shared by
+    BannerOverlay and CountdownOverlay below."""
     (text_w, text_h), baseline = cv2.getTextSize(text, _FONT, _FONT_SIZE, _THICKNESS)
     channels = frame.img.shape[2]
     backing_color = _BACKING_COLOR + (255,) if channels == 4 else _BACKING_COLOR
@@ -44,13 +39,11 @@ def _draw_with_backing(frame, text, x, y, color):
 
 
 class BannerOverlay:
-    """Subscribe on_game_start to topics.GAME_START and on_game_end to
-    topics.GAME_END. Shows "GO" or "GAME OVER" for `duration_ms`, then
-    stops.
+    """Subscribes on_game_start/on_game_end to GAME_START/GAME_END.
+    Shows "GO" or "GAME OVER" for `duration_ms`, then stops.
 
-    The state machine is kept pure and separate from drawing (see
-    `showing`), so a test can assert what is showing at a given elapsed_ms
-    with no frame to draw onto."""
+    The state machine (`showing`) is kept pure and separate from
+    drawing, so a test can assert what is showing at a given elapsed_ms."""
 
     def __init__(self, duration_ms=2000):
         self._duration_ms = duration_ms
@@ -59,33 +52,21 @@ class BannerOverlay:
         self._shown_at_ms = None  # elapsed_ms when `_text` started showing
 
     def on_game_start(self, payload):  # pylint: disable=unused-argument
-        """Queue the start banner. `payload` is GAME_START's {} -- unused,
+        """Queue the start banner. `payload` (GAME_START's {}) is unused,
         kept for a uniform bus-handler signature."""
         self._pending = "GO"
 
     def on_game_end(self, payload):  # pylint: disable=unused-argument
-        """Queue the end banner. `payload` is GAME_END's payload -- unused
-        (this overlay does not report a winner), kept for the same reason
-        as on_game_start."""
+        """Queue the end banner. `payload` is unused -- this overlay does
+        not report a winner -- kept for the same reason as on_game_start."""
         self._pending = "GAME OVER"
 
     def show_result(self, winner, winner_username):
         """Queue the end banner naming the actual outcome: "<username>
-        wins" for a decisive game, or "Game ended with no result" when
-        `winner` is None -- both players disconnected (slide 5.2), or any
-        other reason no result could be determined. Never "draw":
-        Server_Design.md's rule is that an inconclusive game is not scored
-        as one, and the banner should not suggest otherwise either.
-
-        Separate from on_game_end (kept exactly as it was, for whatever
-        wants the plain, uninformative trigger) because this needs the
-        actual outcome, which only the server knows and reports by
-        `winner_username`, not by color -- a color means nothing to a
-        player who does not track them, but everyone knows their own
-        name. See client.py's run() for when this is called instead of
-        on_game_end: once game_over is true AND the server's own
-        `game_over` message has actually arrived (_ServerLink.result()),
-        rather than guessing from the snapshot alone."""
+        wins", or "Game ended with no result" when `winner` is None --
+        never "draw", since an inconclusive game is not scored as one.
+        Separate from on_game_end because this needs the actual outcome
+        and the winner's name, which only the server reports."""
         if winner is None:
             self._pending = "Game ended with no result"
         else:
@@ -104,12 +85,9 @@ class BannerOverlay:
         return self._text
 
     def draw(self, frame, elapsed_ms):
-        """Draw the current banner onto `frame`, if one is showing, over a
-        filled dark backing rectangle sized to the text -- without it,
-        white text is unreadable over a light board square, which for
-        text this size is true under roughly half of any board position.
-        A no-op -- frame is never touched -- on a fresh overlay or once
-        the banner has expired."""
+        """Draw the current banner onto `frame`, over a dark backing
+        rectangle sized to the text, since light text is unreadable over
+        a light board square. No-op if nothing is showing."""
         text = self.showing(elapsed_ms)
         if text is None:
             return
@@ -127,56 +105,29 @@ _WAITING_COLOR = (60, 60, 255, 255)  # same red-ish as the countdown: nothing ca
 
 
 class CountdownOverlay:
-    """Draws connection/opponent-status text over the board -- not the
-    side panel, per Step 9: the opponent may or may not still be there
-    (or may not have joined at all yet, live-testing's own addition), so
-    none of the messages this class shows should be easy to miss.
-
-    Reuses BannerOverlay's drawing pattern (the shared _draw_with_backing
-    above) but not its bus-driven state machine. The countdown itself
-    (draw's `seconds`) is a live, externally updated number -- driven by
-    _ServerLink.countdown() in client.py's run() -- not a one-shot
-    announcement with a fixed duration. The reconnect confirmation IS
-    timed, but on a plain elapsed_ms deadline set by show_reconnected(),
-    not a bus event: run() is what notices a countdown has gone quiet
-    while the game is still in progress (the one case that actually means
-    the opponent came back -- see show_reconnected's own docstring), and
-    this class only ever draws what it is told."""
+    """Draws connection/opponent-status text over the board, not the
+    side panel, so it cannot be missed even if no opponent has joined
+    yet. The countdown is a live, externally driven number, unlike
+    BannerOverlay's one-shot bus events; the reconnect confirmation is a
+    one-shot timed message set by show_reconnected()."""
 
     def __init__(self):
-        self._reconnected_shown_at_ms = None  # None until show_reconnected() -- see its docstring
+        self._reconnected_shown_at_ms = None  # None until show_reconnected() sets it
 
     def show_reconnected(self, elapsed_ms):
-        """Queue the "Opponent reconnected" confirmation, starting now (in
-        the same wall-clock stopwatch draw() is timed against). Call this
-        only when a countdown that WAS running has gone quiet while the
-        game is still in progress -- the one case that actually means the
-        opponent came back, as opposed to the countdown expiring and
-        ending the game instead (auto-resign, slide 5.2), which reports
-        its own outcome through BannerOverlay.show_result instead. Telling
-        the two apart is run()'s job, not this class's: it is the one
-        place that already sees both the countdown and the snapshot's own
-        game_over flag every frame."""
+        """Queue the "Opponent reconnected" confirmation, timestamped at
+        `elapsed_ms`. Call only when a countdown that was running has
+        gone quiet while the game is still in progress -- as opposed to
+        expiring and ending the game, which reports its own outcome
+        through BannerOverlay.show_result instead."""
         self._reconnected_shown_at_ms = elapsed_ms
 
     def draw(self, frame, seconds, elapsed_ms, waiting=False):
-        """Draw "Waiting for an opponent..." if `waiting` is True (live-
-        testing fix: a game with an empty seat must say so, not just look
-        frozen -- see server.py's own module docstring for the exploit
-        this closes). Otherwise, draw the live countdown if one is
-        running (`seconds` is not None), or "Opponent reconnected" if
-        show_reconnected() was called within the last _RECONNECTED_MS of
-        `elapsed_ms`. A no-op -- frame untouched -- when none apply.
-
-        `waiting` takes priority over everything else: a game with an
-        empty seat has no opponent to disconnect or reconnect in the
-        first place, so the other two can only be stale leftovers from a
-        PREVIOUS round on this same reused connection (Step 12) while
-        `waiting` is true. Once `waiting` is false, a fresh disconnect
-        still takes priority over a still-showing reconnect confirmation,
-        as before: `seconds` reflects what is actually happening right
-        now, which matters more than a message about what just finished
-        happening."""
+        """Draw "Waiting for an opponent..." if `waiting`, else the live
+        countdown if one is running, else "Opponent reconnected" if
+        show_reconnected() fired within the last _RECONNECTED_MS. No-op
+        if none apply. `waiting` takes priority: an empty seat has no
+        opponent to disconnect or reconnect from."""
         if waiting:
             self._draw_centered(frame, _WAITING_TEXT, _WAITING_COLOR)
             return

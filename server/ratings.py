@@ -10,15 +10,11 @@ _log = logging.getLogger(__name__)
 
 
 def _connect_db():  # pragma: no cover
-    """Connect to Postgres and make sure the players schema exists
-    (including the pw_hash/salt columns). -> the connection, for the
-    server to keep and reuse for the rest of its life -- login checks
-    (server.auth._authenticate) and rating updates
-    (_update_ratings_on_game_end) both need one. -> None on any failure,
-    logged and swallowed rather than raised, so the caller starts the
-    game server either way (Server_Design.md section 10: live games do
-    not depend on the database) -- every later user of this connection
-    already treats None as "skip the check this needs a database for"."""
+    """Connect to Postgres and make sure the players schema exists.
+    -> the connection, for the server to keep and reuse for its whole
+    life. -> None on any failure, logged and swallowed rather than
+    raised: live games must not depend on the database, so the server
+    starts either way."""
     try:
         conn = db.connect()
         db.ensure_schema(conn)
@@ -38,33 +34,11 @@ def _connect_db():  # pragma: no cover
 
 
 def _update_ratings_on_game_end(db_conn, payload):
-    """GAME_END subscriber (the rating half): reads `winner`/`seats` from
-    the payload GameRegistry already publishes and writes new ELO ratings
-    for the "w" and "b" seats. This is the only subscriber ratings
-    needed -- GameRegistry does not change, exactly as its own module
-    docstring says the bus exists to make possible.
-
-    Does nothing when `winner` is None (an uncounted game -- see
-    common.elo.new_ratings' own docstring), when either seat is empty (a
-    game that never had two players), or when `db_conn` is None (Postgres
-    unreachable -- see _connect_db). Ignores "viewer" seats: `seats` may
-    hold more than two usernames, only "w"/"b" affect rating.
-
-    Never raises into the registry that published this event -- wrapped in
-    a broad except, same reasoning as server.auth._authenticate's: a
-    database failure here must not stop the tick loop that published
-    GAME_END, only skip recording this one game's result (write-behind,
-    per Server_Design.md). A missing player row (get_rating returns None
-    -- possible if the database was unreachable at THAT player's login,
-    see server.auth._authenticate) is treated the same way: logged and
-    skipped, not a crash.
-
-    -> (white_user, new_white, black_user, new_black) on a successful
-    update, so server.composition's own subscriber can hand both new ratings to
-    the rating_updates list -- server.tick drains it every tick and
-    pushes each still-connected player a fresh protocol.rating (mirroring
-    ended_games' own hand-off list). -> None whenever no update was made,
-    for any of the reasons above."""
+    """GAME_END subscriber: writes new ELO ratings for the "w"/"b" seats,
+    skipping an uncounted game, a missing seat, or an unreachable database
+    (logged, not raised) -- a failure here must only skip that game's
+    result, never break the tick loop that published it. -> (white_user,
+    new_white, black_user, new_black) on success, else None."""
     if db_conn is None:
         return None
     winner = payload["winner"]

@@ -1,9 +1,7 @@
 """Postgres connection and schema for player accounts and ratings.
 
-Server_Design.md section 10, Step A first proved the server and Postgres
-could talk. Step 8 (slide 4) is what actually uses that connection: an
-account is a username with a password (hashed, never stored in the clear)
-and a rating that moves by ELO after every decisive game.
+An account is a username with a password (hashed, never stored in the
+clear) and a rating that moves by ELO after every decisive game.
 
 What this module owns: opening a connection from DATABASE_URL, creating and
 upgrading the players schema, hashing/verifying passwords, and reading/
@@ -31,12 +29,11 @@ _PBKDF2_ITERATIONS = 100_000
 _SALT_BYTES = 16
 
 # One statement, not two DDL calls: CREATE TABLE IF NOT EXISTS on its own
-# only handles a database that has never seen this table before. Checked
-# against this project's own dev volume, not assumed: the players table
-# created back in Step A already exists without pw_hash/salt, so on an
-# upgrade this statement must ALSO add those columns to a table that is
-# already there -- ALTER TABLE ... ADD COLUMN IF NOT EXISTS is what makes
-# that idempotent (safe to run again on a database that already has them).
+# only handles a database that has never seen this table before. An older
+# deployment's players table can already exist without pw_hash/salt, so
+# this statement must ALSO add those columns to a table that is already
+# there -- ALTER TABLE ... ADD COLUMN IF NOT EXISTS is what makes that
+# idempotent (safe to run again on a database that already has them).
 _ENSURE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS players (
     username TEXT PRIMARY KEY,
@@ -83,17 +80,10 @@ WHERE username IN (%s, %s)
 
 def connect(url=None, connector=None):
     """Open a connection to Postgres. `url` defaults to the DATABASE_URL
-    environment variable; raises a clear error if neither is given, rather
-    than silently falling through to psycopg's own default connection
-    parameters (which would likely reach the wrong database, or none at
-    all).
-
-    `connector` is the callable that actually opens the connection given a
-    url, and defaults to the real psycopg connector below. It is injected --
-    the same pattern as ClientProxy(send) and GameRegistry(make_session)
-    elsewhere in this project -- so the URL-resolution logic above can be
-    exercised by a test with no live database and no patching of this
-    module's own code: a test just passes its own callable instead."""
+    environment variable; raises rather than silently falling through to
+    psycopg's own default parameters, which could reach the wrong database.
+    `connector` (the callable that opens the connection) is injected, so
+    this can be tested with no live database and no patching."""
     url = url or os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL is not set and no url was given")
@@ -107,9 +97,8 @@ def _connect(url):  # pragma: no cover -- needs a live Postgres to exercise
 
 def ensure_schema(conn):
     """Create the players table if it does not already exist, and add the
-    pw_hash/salt columns (Step 8) if the table exists but predates them --
-    see _ENSURE_SCHEMA_SQL's own comment for why plain CREATE TABLE IF NOT
-    EXISTS is not enough by itself."""
+    pw_hash/salt columns if the table exists but predates them (an
+    upgrade from before passwords existed)."""
     with conn.cursor() as cur:
         cur.execute(_ENSURE_SCHEMA_SQL)
     conn.commit()
@@ -147,14 +136,10 @@ def _hash_password(password, salt):
 
 def create_player(conn, username, password):
     """Create a brand-new account for `username`/`password`, at
-    DEFAULT_RATING. -> True if the account was created, False if
-    `username` already exists (the caller should fall back to
-    verify_password instead -- see server.py's login handling).
-
-    Never stores `password` itself: a fresh random salt
-    (secrets.token_bytes) and the PBKDF2 digest of the two together are
-    what actually go into the row, as parameters -- the plaintext appears
-    in neither the SQL text nor, once hashed, in the parameters either."""
+    DEFAULT_RATING. -> True if created, False if `username` already exists
+    (the caller should fall back to verify_password instead). Never stores
+    `password` itself: a fresh random salt and the PBKDF2 digest of the
+    two together go into the row instead, as parameters."""
     salt = secrets.token_bytes(_SALT_BYTES)
     pw_hash = _hash_password(password, salt)
     with conn.cursor() as cur:
@@ -166,15 +151,10 @@ def create_player(conn, username, password):
 
 def verify_password(conn, username, password):
     """-> whether `password` matches the stored password for `username`.
-    False, not raised, if `username` does not exist -- a caller does not
-    need a separate existence check first.
-
-    Recomputes the digest from the STORED salt (a fresh one would never
-    match, even for the right password) and compares with
-    hmac.compare_digest, not ==: `==` on bytes short-circuits at the first
-    differing byte, which leaks how many leading bytes matched through
-    how long the comparison took -- exactly the timing side-channel
-    constant-time comparison exists to close."""
+    False, not raised, if `username` does not exist. Recomputes the digest
+    from the stored salt and compares with hmac.compare_digest, not `==`,
+    since `==` short-circuits at the first differing byte -- the timing
+    side-channel a constant-time comparison exists to close."""
     with conn.cursor() as cur:
         cur.execute(_GET_PASSWORD_SQL, (username,))
         row = cur.fetchone()

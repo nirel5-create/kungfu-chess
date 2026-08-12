@@ -1,31 +1,17 @@
-"""GameRegistry: which games exist, who sits in which seat, and what happens
-to a game once it ends.
+"""GameRegistry: which games exist, who sits in which seat, and what
+happens to a game once it ends.
 
-This is `Server_Design.md`'s Game Allocator boundary, at the smallest scale
-that answers "who decides which game you sit in". Before this module, the
-server built exactly ONE GameSession at startup and kept it forever: once
-that session's king fell, every later arrival got a permanently-finished
-game and closed immediately. This module is the fix -- a server holds MANY
-games, each with its own lifecycle -- but it deliberately does not decide
-WHICH game a new arrival joins. That is policy, kept in server.py's
-_find_or_create_game on purpose, so Play and Room can each replace only
-that one function, with no change here.
+What this module owns: which games exist, who sits in which seat of
+which game, and what happens to a game after it ends (a lingering
+period, then removal). What it does NOT own: how a player is matched to
+a game, sockets, broadcasting, or rating arithmetic.
 
-What this module owns: which games exist, who sits in which seat of which
-game, and what happens to a game after it ends (a lingering period, then
-removal).
-What it does NOT own: how a player is matched to a game (policy, kept out on
-purpose), sockets, broadcasting, rating arithmetic, or the passage of real
-time -- advance(ms) takes an explicit ms, exactly as GameSession.advance(ms)
-already does, so behaviour is deterministic and testable without a real
-clock.
-
-Why publish lifecycle events instead of writing to a database: this module
-does not know what a rating is. It announces GAME_START/GAME_END and moves
-on; whoever cares subscribes to the Bus. That is the same write-behind split
-Server_Design.md argues for when Postgres is down, and it is what lets ELO
-be added later as a bus subscriber, with no change to this file.
-"""
+Two decisions kept deliberately outside this module: WHICH game a new
+arrival joins is policy, left to server.py's _find_or_create_game so
+Play and Room can each replace just that function; and a game's
+lifecycle (GAME_START/GAME_END) is announced on the Bus rather than
+acted on directly, since this module does not know what a rating is --
+letting ELO be added later as a subscriber, with no change here."""
 
 import uuid
 
@@ -52,15 +38,10 @@ class GameRegistry:
 
     def __init__(self, make_session, bus=None, king_type=_DEFAULT_KING_TYPE):
         """make_session -- zero-argument callable returning a fresh
-        GameSession. Injected, not imported: this module must not know how
-        a board or engine is built, which is what lets a test hand it a
-        tiny 1x3 board.
-        bus -- an optional common.bus.Bus. When given, GAME_START and
-        GAME_END are published on it; when None, nothing is published and
-        everything else about the registry is unchanged.
-        king_type -- the token (e.g. "K") that marks a king in a snapshot's
-        pieces; see the module-level comment on why this cannot be read
-        from a session itself."""
+        GameSession, injected so this module need not know how a board or
+        engine is built (a test can hand it a tiny 1x3 board). bus --
+        optional common.bus.Bus; GAME_START/GAME_END publish on it when
+        given. king_type -- the token marking a king in a snapshot's pieces."""
         self._make_session = make_session
         self._bus = bus
         self._king_type = king_type
@@ -87,45 +68,11 @@ class GameRegistry:
                 return game_id
 
     def join(self, game_id, username):
-        """-> the color seated for `username` in `game_id`: "w", "b", or
-        "viewer". Raises KeyError for an unknown game_id.
-
-        A username that already has a seat AND IS NOT CURRENTLY CONNECTED
-        gets that same seat back -- this is what makes reconnecting work,
-        since leave() below does not erase the seat. This also clears any
-        disconnect countdown running for that seat (away_ms, see leave()/
-        advance()) -- what makes the reconnect window REAL rather than
-        nominal: without clearing it, a player who reconnects with seconds
-        to spare would still auto-resign later, at the ORIGINAL 20s
-        deadline, since advance() has no other way to learn they came
-        back.
-
-        The reconnect window is bounded now (DISCONNECT_GRACE_MS, see
-        advance()): come back before the countdown finishes, or the game
-        auto-resigns for the missing color and this seat's owner has
-        nothing left to reconnect to. The seat dict entry itself still
-        never vanishes on its own -- only the game around it can end.
-
-        A username that already has a seat AND IS CURRENTLY CONNECTED is a
-        second, simultaneous connection under the same name, not a
-        reconnect -- "I am coming back" and "I am already connected
-        elsewhere" look identical if only `seats` is consulted, but
-        `connected` (already tracked, for exactly this) tells them apart.
-        Raises AlreadyConnectedError for that case rather than seating the
-        second connection as "viewer": the earlier "viewer" behaviour did
-        stop the second window from controlling the first one's pieces, but
-        left the player with nothing but an unresponsive board to explain
-        why. The original seat is left untouched either way -- only how
-        the second connection is told about it changes. (This is scoped to
-        exactly that case -- `connected` records USERNAMES, not a count of
-        live connections per username, so if the original connection then
-        leaves while a rejected second attempt is somehow still retrying, a
-        later join looks like a fresh reconnect again. Closing that gap
-        needs counting connections, not just tracking who has ever joined;
-        not needed for the bug this fixes.)
-
-        Otherwise, the first of "w"/"b" not already held by some username
-        in this game is assigned; if both are held, the seat is "viewer"."""
+        """-> the color seated for `username`: the first open "w"/"b" seat,
+        or "viewer" once both are held; a disconnected seat holder gets it
+        back with its countdown cleared. Raises KeyError for an unknown
+        game_id, and AlreadyConnectedError if already connected -- a second
+        window, not a reconnect -- rather than silently doubling as a viewer."""
         game = self._games[game_id]
         if username in game.seats:
             if username in game.connected:
@@ -147,16 +94,10 @@ class GameRegistry:
         return "viewer"
 
     def leave(self, game_id, username):
-        """Mark `username` as disconnected from `game_id`. Does not free
-        the seat -- see join(). A no-op for an unknown game or an unknown
-        username: a disconnect can arrive after a game has already been
-        removed, and that is normal, not exceptional.
-
-        If `username` holds "w" or "b", this also starts their disconnect
-        countdown at 0 -- see advance(), which ticks every entry in
-        away_ms toward DISCONNECT_GRACE_MS and auto-resigns whoever
-        reaches it. A viewer leaving starts nothing: a spectator walking
-        away is not a forfeit."""
+        """Mark `username` as disconnected from `game_id`, without freeing
+        the seat. A no-op for an unknown game or username. If `username`
+        holds "w" or "b", also starts their disconnect countdown at 0; a
+        viewer leaving starts nothing -- walking away is not a forfeit."""
         game = self._games.get(game_id)
         if game is not None:
             game.connected.discard(username)
@@ -173,11 +114,10 @@ class GameRegistry:
 
     def seats(self, game_id):
         """-> {username: color} for every seat taken in `game_id`
-        (including viewers), or {} for an unknown game_id -- the same
-        tolerance color_of already shows. The same shape GAME_END's own
-        payload already carries, but for a LIVE, ongoing game: lets the
-        server show each seat's real display name as it is taken, not
-        only once the game has ended."""
+        (including viewers), or {} for an unknown game_id. The same shape
+        GAME_END's payload carries, but for a LIVE game: lets the server
+        show each seat's display name as it is taken, not only once the
+        game ends."""
         game = self._games.get(game_id)
         if game is None:
             return {}
@@ -190,15 +130,10 @@ class GameRegistry:
         return game.session if game is not None else None
 
     def game_of(self, username):
-        """-> the game_id of a live game `username` already holds a seat
-        in (any seat: "w", "b", or "viewer"), or None if there is none.
-        "Live" means the game has not ended (game.session.game_over is
-        False) -- a seat in an already-ended game is not something to
-        return a player to.
-
-        A username can hold a seat in at most one live game at a time --
-        join() refuses a second, still-connected attempt with
-        AlreadyConnectedError, and a seat once given is never handed to a
+        """-> the game_id of a live (not yet ended) game `username`
+        already holds a seat in, or None. A username holds a seat in at
+        most one live game at a time -- join() refuses a second,
+        still-connected attempt, and a seat once given never moves to a
         different username -- so at most one game_id can ever match."""
         for game_id, game in self._games.items():
             if username in game.seats and not game.session.game_over:
@@ -212,10 +147,9 @@ class GameRegistry:
     def countdown_ms(self, game_id):
         """-> {username: ms remaining before auto-resign}, for every
         seated player currently away in `game_id`. Empty when nobody is
-        away, and empty -- not an error -- for an unknown game_id too, the
-        same tolerance color_of/session already show. The server
-        broadcasts this (as whole seconds, not milliseconds) so the
-        opponent can see the count on screen."""
+        away, and empty -- not an error -- for an unknown game_id too.
+        The server broadcasts this as whole seconds, not milliseconds,
+        so the opponent can see the count on screen."""
         game = self._games.get(game_id)
         if game is None:
             return {}
@@ -223,41 +157,22 @@ class GameRegistry:
                 for username, away in game.away_ms.items()}
 
     def has_connected_players(self, game_id):
-        """-> whether any username is currently connected to `game_id` --
-        False for an unknown game_id too, the same tolerance color_of
-        shows. Lets server.py's _find_or_create_game ask this without
-        reaching into GameRegistry's internals -- added for a bug found by
-        manual testing: a stranger arriving at the default game used to be
-        handed an abandoned one (every seat kept, per join()'s own design,
-        but nobody actually connected to it), left waiting for an
-        opponent who had already left."""
+        """-> whether any username is currently connected to `game_id`
+        (False for an unknown game_id too). Lets server.py check this
+        without reaching into GameRegistry's internals -- without it, a
+        stranger could be handed an abandoned game (seats never freed
+        but nobody connected), waiting for an opponent already gone."""
         game = self._games.get(game_id)
         if game is None:
             return False
         return bool(game.connected)
 
     def both_seated(self, game_id):
-        """-> whether BOTH "w" and "b" are currently held by some username
-        in `game_id`. False for an unknown game_id too, the same
-        tolerance color_of/seats/has_connected_players already show.
-
-        Added for a bug found by live testing: a lone player in an
-        otherwise-empty room could walk a piece across the board, over
-        several real-time moves, and capture the opponent's undefended
-        king with nobody ever having joined to defend it -- a free,
-        repeatable win (create a room, capture the lone king, repeat).
-        server.py uses this to hold a game's board in a waiting state --
-        no move is forwarded to GameSession.submit, so no motion ever
-        starts and no capture is ever possible -- until this turns True,
-        and to tell a waiting client so (protocol.waiting), rather than
-        leaving the board simply looking frozen with no explanation.
-
-        Seats are sticky (join() never clears one, only leave() marks its
-        holder away), so once True for a given game_id this stays True
-        even if a player later disconnects: a game that has genuinely
-        started is never held "waiting" again just because someone
-        stepped away -- only server.py's own disconnect countdown governs
-        that case, unchanged."""
+        """-> whether BOTH "w" and "b" are currently held in `game_id`
+        (False for an unknown game_id too). Without this, a lone player
+        could capture the opponent's undefended king for a free,
+        repeatable win. Seats are sticky, so once True this stays True
+        even after a later disconnect -- only the countdown governs that."""
         game = self._games.get(game_id)
         if game is None:
             return False
@@ -265,25 +180,11 @@ class GameRegistry:
         return "w" in colors and "b" in colors
 
     def advance(self, ms):
-        """Tick every live game's session by `ms`, publish GAME_END exactly
-        once for each game that just became game_over (by king capture or
-        by auto-resign), and remove any game whose linger period has run
-        past GAME_END_LINGER_MS.
-
-        The linger period is counted from the same call in which a game
-        becomes game_over -- this call's `ms` already counts toward it, not
-        just later calls' -- so behaviour does not depend on how finely the
-        caller chops time into advance() calls.
-
-        Ordering: a king capture is checked first, and auto-resign
-        (_advance_countdowns) is only even considered when the game is
-        NOT already ended -- by either mechanism, this call or an earlier
-        one. That single `elif` is what guarantees a game already ended
-        never auto-resigns on top, and what stops a countdown expiring in
-        the very same call as a king capture from publishing GAME_END
-        twice: the king-capture branch already set game.ended, so the
-        elif is skipped outright, exactly as `if X: ... elif Y` always
-        skips Y once X has already run."""
+        """Tick every live game's session by `ms`, publish GAME_END once
+        for each game that just ended (king capture or auto-resign), and
+        remove any game whose linger period, counted from the call it
+        ended in, has passed GAME_END_LINGER_MS. Auto-resign runs only
+        via `elif` when not already ended, so one call never double-publishes."""
         for game_id, game in list(self._games.items()):
             game.session.advance(ms)
             if game.session.game_over and not game.ended:
@@ -301,26 +202,11 @@ class GameRegistry:
                     del self._games[game_id]
 
     def _advance_countdowns(self, game_id, game, ms):
-        """Add `ms` to every seated player's disconnect countdown
-        (game.away_ms) and auto-resign if any of them reaches
-        DISCONNECT_GRACE_MS. Only called from advance() for a game that
-        is not already ended -- see its own docstring for why that
-        ordering matters.
-
-        The winner is whichever SEATED color did NOT just time out; if
-        both did (both players away past the grace period), the winner is
-        None -- a game nobody was present for is not counted, the same
-        rule as a king capture with no clear winner. An empty, never-seated
-        color (e.g. a lone player who disconnected before anyone ever
-        joined as the other color) is excluded from consideration entirely
-        rather than counted as "remaining" -- otherwise a game with only
-        one player who ever connected would nonsensically declare the
-        empty seat the winner instead of ending with None, which is what
-        actually happened: nobody was present on that side either. Ends
-        the game the same way a king capture does (game.ended = True, one
-        GAME_END publish with the same {game_id, winner, seats} shape) so
-        ratings update through the existing GAME_END subscriber with no
-        second code path."""
+        """Add `ms` to every seated player's disconnect countdown and
+        auto-resign whoever reaches DISCONNECT_GRACE_MS. Winner is the
+        seated color that did NOT time out; if both did, or a color was
+        never seated (excluded, not "remaining"), the winner is None.
+        Ends the game the same way a king capture does, one GAME_END."""
         if not game.away_ms:
             return
         expired = set()
@@ -337,9 +223,7 @@ class GameRegistry:
         remaining_colors = [c for c in seated_colors if c not in expired_colors]
         winner = remaining_colors[0] if len(remaining_colors) == 1 else None
         game.session.force_game_over()  # no king was captured, so the
-        #   (frozen) engine has no idea this game just ended -- see
-        #   GameSession.force_game_over's own docstring for why this is
-        #   what makes the client's existing game-over handling fire.
+        #   (frozen) engine has no idea this game just ended.
         game.ended = True
         self._publish(topics.GAME_END, {
             "game_id": game_id,

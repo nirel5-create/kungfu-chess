@@ -24,28 +24,16 @@ _DEFAULT_NAMES = {
     # docstring), so the client has no event to trigger this sound from.
     # This is a real gap, not an oversight. Closing it later needs a new
     # `error` message from the server plus one more entry in this dict --
-    # nothing else here or in GameEventSource would change. That is the bus
-    # paying off.
+    # nothing else here or in GameEventSource would need to change.
 }
 
 
 class _PygamePlayer:  # pragma: no cover -- needs real audio hardware, pylint: disable=too-few-public-methods
-    """The real playback callable used when no `play` is injected. Callable,
-    so it slots directly into SoundPlayer's injected `play` seam --
-    SoundPlayer neither knows nor cares that this one, unlike a test's
-    `play`, holds state.
-
-    Replaces winsound.PlaySound, which opened and closed the OS audio
-    device and re-read the file from disk on EVERY call -- Windows puts the
-    device back to sleep between calls, so that open cost was paid again
-    every time, producing an inconsistent delay (observed anywhere from
-    immediate to ~1.5s) with no way to fix it from the calling side; a
-    one-off warm-up sound could not help either, since the device just
-    sleeps again after it. pygame.mixer instead opens the device ONCE, in
-    __init__ below, and keeps it open; every sound named in `names` is
-    decoded into memory as a pygame.mixer.Sound in that same __init__, so a
-    later play() call only has to start a buffer already in RAM. Both of
-    those happen once, at construction (client startup), never per call."""
+    """The real playback callable used when no `play` is injected. Replaces
+    winsound.PlaySound, which reopened the OS audio device and re-read the
+    file from disk on every call, causing an inconsistent delay (observed
+    anywhere from immediate to ~1.5s); pygame.mixer decodes every sound
+    into memory once in __init__, so play() only starts a buffer in RAM."""
 
     def __init__(self, folder, names):
         import pygame  # pylint: disable=import-outside-toplevel
@@ -63,18 +51,11 @@ class _PygamePlayer:  # pragma: no cover -- needs real audio hardware, pylint: d
 
 
 class SoundPlayer:
-    """Subscribe on_sound to topics.SOUND.
-
-    `play` is injected, defaulting to the real pygame-backed player -- the
-    same pattern as ClientProxy(send), GameRegistry(make_session) and
-    db.connect(connector=). That is what makes this testable with no audio
-    hardware, and it is why there is no monkeypatching anywhere in this
-    project.
-
-    Mute lives here, not in the draw loop and not in GameEventSource:
-    muting is "stop playing sounds", not "stop deciding what the sounds
-    would be" -- GameEventSource keeps publishing regardless of whether
-    anyone is listening, which is what a bus is for."""
+    """Subscribe on_sound to topics.SOUND. `play` is injected, defaulting
+    to the real pygame-backed player, so this is testable with no audio
+    hardware. Mute lives here, not in GameEventSource: muting means "stop
+    playing sounds", not "stop deciding what they'd be" -- the source
+    keeps publishing regardless of whether anyone is listening."""
 
     def __init__(self, folder, play=None, names=None):
         """folder -- directory the sound files live in (assets/sounds).

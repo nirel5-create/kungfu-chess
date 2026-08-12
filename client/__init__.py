@@ -1,4 +1,4 @@
-"""Pure, testable client-side modules that react to the bus (Step 6).
+"""Pure, testable client-side modules that react to the bus.
 
 Split out from the root client.py script on purpose: client.py wires sockets
 and OpenCV and is untestable by design (see its own module docstring), while

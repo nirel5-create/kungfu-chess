@@ -1,34 +1,18 @@
 """Async WebSocket server for Kung-Fu Chess.
 
-app.py's local frame loop is clock.tick() -> engine.snapshot() ->
-renderer.render(). The server keeps the first half of that loop -- the
-clock and the engine -- and moves the second half to whichever clients are
-connected: every ~30 ms it advances every live game and broadcasts each
-game's state to the clients sitting in that game, so each window redraws
-the same board as the others in its game. Commands travel the other way: a
-client sends a `move`/`jump` message, decoded and handed to
-GameSession.submit -- nothing here builds or applies a command itself.
+Every ~30 ms this advances every live game and broadcasts each game's
+state to the clients sitting in it; a client's `move`/`jump` message is
+decoded and handed to GameSession.submit, never built or applied here.
 
-What this package owns: the websocket connections, the tick interval, and
-broadcasting. What it does NOT own: which games exist, seats, or lifecycle
--- that is common.registry.GameRegistry; nor game rules or command handling
--- that is common.net.GameSession, one layer below the registry. This
-package is plumbing only, and is not unit-tested, the same way app.py's
-real OpenCV window is not: a live socket cannot be driven from a test
-without becoming an integration test. GameRegistry and GameSession are
-fully covered by tests/unit/test_registry.py and tests/unit/test_session.py.
+Owns the websocket connections, the tick interval, and broadcasting --
+not which games exist, seats, or lifecycle (common.registry.
+GameRegistry), nor game rules or command handling (common.net.
+GameSession). Not unit-tested itself: a live socket cannot be driven
+from a test without becoming an integration test.
 
-Split by subject: session.py (how a fresh game is built), auth.py (login),
-rooms.py (Room and the default shared game), matchmaking.py (Play),
-history.py (per-game move history), connection.py (one connection's whole
-lifetime), tick.py (the per-tick broadcast loop), ratings.py (the two
-places this touches Postgres directly), composition.py (the composition
-root `main()` that wires all of the above and starts listening -- not
-named app.py, to avoid colliding with the root app.py's own coverage
-config, see .coveragerc's omit list). The handful of
-names below are re-exported so existing imports of the module -- `from
-server import _create_room`, and so on -- keep working exactly as before
-the split.
+Split by subject: session.py, auth.py, rooms.py, matchmaking.py,
+history.py, connection.py, tick.py, ratings.py, composition.py (the
+composition root). Names below are re-exported for existing imports.
 """
 
 from server.auth import _reserve_username

@@ -1,14 +1,11 @@
-"""The client's own state machine for what screen the player is on (slide
-3's Home screen, Step 12): LOGIN (no username yet) -> HOME (logged in,
-choosing what to do) -> PLAYING (in a game) -> back to HOME once it ends,
-in a loop; QUIT is reached only from HOME.
+"""The client's own state machine for what screen the player is on:
+LOGIN (no username yet) -> HOME (logged in, choosing what to do) ->
+PLAYING (in a game) -> back to HOME once it ends, in a loop; QUIT is
+reached only from HOME.
 
-No window, no socket -- deciding "what happens after a game ends" (does
-the player go back to LOGIN, or stay HOME?) is exactly the kind of
-decision that must be unit-tested the same way common.matchmaker.
-MatchMaker and common.registry.GameRegistry already are (see their own
-module docstrings): the decision is pure, the window/socket plumbing that
-drives it (client.py's run()) is pragma: no cover.
+No window, no socket: deciding "what happens after a game ends" (back to
+LOGIN, or stay HOME?) is a pure decision, kept unit-testable and separate
+from the window/socket plumbing that drives it.
 """
 
 LOGIN = "login"
@@ -33,14 +30,14 @@ class HomeFlow:
     @property
     def username(self):
         """-> the logged-in username, or None before logged_in() has ever
-        succeeded (or after login_refused() -- see its own docstring)."""
+        succeeded, or after login_refused()."""
         return self._username
 
     @property
     def room_name(self):
         """-> the room name remembered from the most recent chose() call,
         or "" -- both before any choice has been made, and again once
-        game_ended() has cleared it (see its own docstring)."""
+        game_ended() has cleared it."""
         return self._room_name
 
     def logged_in(self, username):
@@ -59,12 +56,9 @@ class HomeFlow:
         self._state = LOGIN
 
     def chose(self, action, room_name=""):
-        """The player picked `action` at HOME (client.roomdialog.CREATE/
-        JOIN/PLAY/QUIT). CREATE/JOIN/PLAY all move to PLAYING, remembering
-        `room_name` for as long as PLAYING lasts (readable via the
-        room_name property) -- "" for PLAY, the same as ask_room already
-        returns for it. QUIT moves to the terminal QUIT state instead,
-        and never touches `room_name`."""
+        """The player picked `action` at HOME. CREATE/JOIN/PLAY all move
+        to PLAYING, remembering `room_name` ("" for PLAY). QUIT moves to
+        the terminal QUIT state instead, leaving `room_name` untouched."""
         if action == QUIT:
             self._state = QUIT
             return

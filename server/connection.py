@@ -29,23 +29,26 @@ async def _send_state(websocket, session):  # pragma: no cover
     await websocket.send(protocol.dumps(protocol.state(session.snapshot())))
 
 
+async def _refuse(websocket, reason):  # pragma: no cover
+    """Send `protocol.error(reason)`, close `websocket`, and return None --
+    the shared tail of every refusal below. The caller logs first, since
+    only it knows what is worth recording about this particular one."""
+    await websocket.send(protocol.dumps(protocol.error(reason)))
+    await websocket.close()
+    return None
+
+
 async def _join_or_refuse(websocket, registry, game_id, username):  # pragma: no cover
     """registry.join(game_id, username), or -- on AlreadyConnectedError --
-    send `error`, close `websocket`, and return None. -> the assigned
-    color on success. Shared by every path in _seat_for_choice that ends
-    with a direct registry.join call, so the refuse-and-close sequence is
-    written once. In practice this exception should not fire any more
-    (the server-wide _reserve_username check already refuses a duplicate
-    login before this is ever reached), but GameRegistry's own per-game
-    check is kept regardless, so this still handles it correctly if it
-    ever does."""
+    refuse and return None. -> the assigned color on success. This should
+    be rare in practice (_reserve_username already refuses a duplicate
+    login before this is reached), but GameRegistry's own per-game check
+    is kept as a second guard regardless."""
     try:
         return registry.join(game_id, username)
     except AlreadyConnectedError:
         _log.warning("refused %s: already connected to game %s", username, game_id)
-        await websocket.send(protocol.dumps(protocol.error("already_connected")))
-        await websocket.close()
-        return None
+        return await _refuse(websocket, "already_connected")
 
 
 # _seat_via_play's own sentinel: a Play search found nobody, but the
@@ -56,19 +59,11 @@ _PLAY_TIMED_OUT = object()
 
 
 async def _seat_via_play(websocket, state, username):  # pragma: no cover
-    """Play's own way to a seat: GameRegistry.game_of(username) first, in
-    case this is a reconnect -- a player whose disconnect countdown is
-    still running, or who simply still holds a seat, must return to that
-    seat, not be queued to search for a new opponent while their own
-    held seat sits there waiting for them. Only once game_of finds
-    nothing does this fall through to matchmaking.
-
-    -> (game_id, color) once seated and `assigned` already sent. -> None
-    once refused and closed (AlreadyConnectedError, see
-    _join_or_refuse). -> _PLAY_TIMED_OUT once a search found nobody --
-    matchmaking("timeout") already sent by server.matchmaking.
-    _report_matchmaking_timeout; the connection itself stays open, see
-    that sentinel's own comment."""
+    """Play's path to a seat: check GameRegistry.game_of(username) first,
+    so a reconnecting player returns to a seat they still hold instead of
+    being queued for a new opponent; only then falls through to
+    matchmaking. -> (game_id, color) once seated, -> None once refused
+    and closed, or -> _PLAY_TIMED_OUT once a search found nobody."""
     held_game_id = state.registry.game_of(username)
     if held_game_id is not None:
         color = await _join_or_refuse(websocket, state.registry, held_game_id, username)
@@ -83,25 +78,17 @@ async def _seat_via_play(websocket, state, username):  # pragma: no cover
 
 
 async def _seat_via_room_or_default(websocket, state, username, room_choice):  # pragma: no cover
-    """The other two ways to a seat: Room (room_choice is (ROOM_CREATE,
-    name) or (ROOM_JOIN, room_id) -- room_create or room_join picks
-    game_id via _create_room/_join_room instead of _find_or_create_game,
-    and a chosen/created room is confirmed with `room` before anything
-    else, refused the same way if the name is undisplayable, already
-    taken (create), or does not exist (join)) or neither (room_choice is
-    None -- the ordinary shared game, _find_or_create_game).
-
-    -> (game_id, color) once joined and `assigned` already sent. -> None
-    once refused and closed."""
+    """The other two ways to a seat: Room (create or join a named game,
+    confirmed with `room` before anything else) or neither (the shared
+    default game, via _find_or_create_game). -> (game_id, color) once
+    joined and `assigned` sent, -> None once refused and closed."""
     if room_choice is None:
         game_id = _find_or_create_game(state.registry, state.default_game, username)
     else:
         action, room_id = room_choice
         if not is_displayable(room_id):
             _log.warning("refused %s: undisplayable room name %r", username, room_id)
-            await websocket.send(protocol.dumps(protocol.error("invalid_room_name")))
-            await websocket.close()
-            return None
+            return await _refuse(websocket, "invalid_room_name")
         if action == protocol.ROOM_CREATE:
             game_id = _create_room(state.registry, room_id)
             refusal = "room_exists"
@@ -110,9 +97,7 @@ async def _seat_via_room_or_default(websocket, state, username, room_choice):  #
             refusal = "no_such_room"
         if game_id is None:
             _log.warning("refused %s: %s (room %s)", username, refusal, room_id)
-            await websocket.send(protocol.dumps(protocol.error(refusal)))
-            await websocket.close()
-            return None
+            return await _refuse(websocket, refusal)
         await websocket.send(protocol.dumps(protocol.room(game_id)))
     color = await _join_or_refuse(websocket, state.registry, game_id, username)
     if color is None:
@@ -122,30 +107,11 @@ async def _seat_via_room_or_default(websocket, state, username, room_choice):  #
 
 
 async def _seat_for_choice(websocket, state, username, room_choice):  # pragma: no cover
-    """Turn `room_choice` -- _read_room_choice's own result, or the same
-    (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id) /
-    (protocol.PLAY, None) shape _run_game_loop returns when a still-
-    connected player picks again mid-session -- into a seat. The three
-    ways to get one, from `room_choice`, are _seat_via_play and
-    _seat_via_room_or_default's own job (see their docstrings); this
-    function is only the dispatch between them and the Play-timeout
-    retry loop neither of those two owns itself.
-
-    -> (game_id, color) once joined and `assigned` already sent. -> None
-    once this connection has already been refused and closed (an `error`
-    already sent) -- there is nothing left for the caller to do but stop.
-
-    A Play search that times out does NOT close the connection or return
-    None (_seat_via_play's own _PLAY_TIMED_OUT): this loops back to
-    _read_room_choice for whatever the player picks next on the SAME
-    connection, exactly as a finished game already does via
-    _run_game_loop. A player who quits instead of picking again sends
-    nothing, so that read simply times out on its own, same as any other
-    silent disconnect this function already ends on.
-
-    Used identically whether this is the FIRST seat this connection ever
-    gets or a LATER one picked after returning home from a previous game
-    on the SAME still-open connection."""
+    """Turn `room_choice` into a seat: dispatches between _seat_via_play
+    and _seat_via_room_or_default, and owns the retry loop neither of
+    those two does -- a Play search that times out loops back to reading
+    a fresh choice on the same connection instead of closing it. ->
+    (game_id, color) once joined, -> None once refused and closed."""
     while True:
         if room_choice is not None and room_choice[0] == protocol.PLAY:
             seat = await _seat_via_play(websocket, state, username)
@@ -157,29 +123,11 @@ async def _seat_for_choice(websocket, state, username, room_choice):  # pragma: 
 
 
 async def _run_game_loop(websocket, state, seat):  # pragma: no cover
-    """Register the connection in `state.clients`, send the current state
-    and history, then read and apply commands until either the connection
-    actually disconnects or the player picks a new room/Play mid-session
-    -- shared by every path that ends with a seat in a game (the shared
-    default game, a room, or a Play match), so there is exactly one place
-    that runs the command loop and exactly one place that cleans up after
-    it.
-
-    -> None once `websocket` actually closes. -> a fresh room choice --
-    the same (protocol.ROOM_CREATE, name) / (protocol.ROOM_JOIN, room_id)
-    / (protocol.PLAY, None) shape _read_room_choice itself returns -- the
-    moment the client sends one of those three message types, recognized
-    here BEFORE being handed to session.submit so a room choice is never
-    mistaken for a game command. This is what lets a player leave a room
-    and create or join a different one, or start another game after one
-    ends, without ever closing the underlying socket -- see
-    _handle_client's own loop, which reuses the SAME connection for the
-    seat this return value leads to next.
-
-    Does NOT send `assigned`: the shared/room paths send it themselves
-    right before calling this; a Play match already had it sent by
-    server.tick's _seat_matched_pair, before this connection's own
-    coroutine even learns which game or color it was matched to."""
+    """Register the connection, send current state and history, then read
+    and apply commands until it closes or the player picks a new room/
+    Play mid-session -- recognized before being handed to session.submit,
+    so a player can switch rooms or start another game without closing
+    the socket. -> None once closed, else the fresh room choice."""
     game_id, color, username = seat
     state.clients[websocket] = (game_id, username)
     _log.info("%s joined game %s as %s", username, game_id, color)
@@ -238,49 +186,21 @@ async def _run_game_loop(websocket, state, seat):  # pragma: no cover
 
 
 async def _handle_client(websocket, state):  # pragma: no cover
-    """One coroutine for the whole lifetime of one connection -- not one
-    game: read the login username/password the client sends first, then
-    loop seating this same connection into game after game, via
-    _seat_for_choice and _run_game_loop, until it actually disconnects.
-
-    Three things refuse a connection outright -- an `error`, then close,
-    before `state.clients` or GameRegistry.join is ever touched: an
-    undisplayable username (is_displayable -- checked first, so a name
-    cv2 cannot even draw never reaches a password check or the
-    database), a wrong password (_authenticate), or a username already
-    connected ANYWHERE on this server (_reserve_username -- checked next,
-    before a room choice is ever read, so a duplicate login never even
-    sees the Room dialog). _seat_for_choice's own docstring covers every
-    refusal possible after that point.
-
-    Once reserved, `username` is released in the outer `finally` no
-    matter how this coroutine ends -- a real disconnect, a refusal partway
-    through a later game choice, or an unexpected exception -- so a
-    player is never locked out of their own account by a connection that
-    ended abnormally.
-
-    Sends protocol.rating right after a successful login: the home
-    dialog shows it immediately, before the player has ever chosen a
-    room -- see client.composition.run(). server.tick sends a fresh one
-    again whenever a game this connection was part of ends decisively,
-    via the rating_updates hand-off list (see server.composition), so the
-    number shown at home never goes stale after a game changes it."""
+    """One coroutine for a connection's whole lifetime -- not one game:
+    read the login, refuse outright (bad username, password, or a
+    duplicate login) before touching `state.clients` or GameRegistry,
+    then loop seating this connection into game after game. `username`
+    is released in the outer `finally` regardless of how this ends."""
     username, password = await _read_login(websocket)
     if not is_displayable(username):
         _log.warning("refused %s: undisplayable username", username)
-        await websocket.send(protocol.dumps(protocol.error("invalid_username")))
-        await websocket.close()
-        return
+        return await _refuse(websocket, "invalid_username")
     if not _authenticate(state.db_conn, username, password):
         _log.warning("refused %s: bad password", username)
-        await websocket.send(protocol.dumps(protocol.error("bad_password")))
-        await websocket.close()
-        return
+        return await _refuse(websocket, "bad_password")
     if not _reserve_username(state.connected_usernames, username):
         _log.warning("refused %s: already connected", username)
-        await websocket.send(protocol.dumps(protocol.error("already_connected")))
-        await websocket.close()
-        return
+        return await _refuse(websocket, "already_connected")
     try:
         rating_msg = protocol.rating(_current_rating(state.db_conn, username))
         await websocket.send(protocol.dumps(rating_msg))

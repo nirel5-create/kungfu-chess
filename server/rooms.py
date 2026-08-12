@@ -36,17 +36,10 @@ _ROOM_MESSAGE_TIMEOUT_S = 120
 
 async def _read_room_choice(websocket):  # pragma: no cover
     """-> (protocol.ROOM_CREATE, name), (protocol.ROOM_JOIN, room_id), or
-    (protocol.PLAY, None) if the client's optional second message (right
-    after login) is one of those three types within
-    _ROOM_MESSAGE_TIMEOUT_S, else None. None covers two cases identically:
-    a client that never implements the dialog and sends nothing at all,
-    and a client that sent something this function does not recognize --
-    both fall back to _find_or_create_game exactly as before Room
-    existed. A malformed frame is treated the same way rather than as an
-    error: at this point in the handshake the client has nothing else
-    legitimate to send beyond these three, so this is defence in depth,
-    the same spirit as GameSession.submit silently ignoring an
-    unrecognized message type."""
+    (protocol.PLAY, None) if the client's optional second message arrives
+    within _ROOM_MESSAGE_TIMEOUT_S, else None -- covering a client that
+    never sends one, an unrecognized message, and a malformed frame all
+    the same way, since every one of them falls back to the shared game."""
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=_ROOM_MESSAGE_TIMEOUT_S)
     except (asyncio.TimeoutError, websockets.ConnectionClosed):
@@ -65,35 +58,11 @@ async def _read_room_choice(websocket):  # pragma: no cover
 
 
 def _find_or_create_game(registry, default_game, username):
-    """The default-game policy: everyone who asks for neither a room nor
-    Play shares one open game, and a new one is created when none is
-    open. Play and Room replace THIS FUNCTION and nothing else -- which
-    is the point of keeping it separate from GameRegistry.
-
-    `default_game` is a single-key {"id": ...} box, owned by the
-    composition root (server.composition) and threaded through the same way
-    `clients` is, remembering the ONE game_id this function itself
-    created for this purpose. Deliberately NOT "scan registry.game_ids()
-    for any open game": a room lives in the exact same registry, keyed by
-    its room name, so "any open game" would include other people's
-    rooms -- reproduced live: a Play click, or a room_join that arrived a
-    hair past _read_room_choice's timeout, would silently land the caller
-    in someone else's still-open room. Remembering exactly the id this
-    function handed out itself closes that off.
-
-    "Open" means the game exists, is not yet game_over, AND has at least
-    one currently-connected player -- UNLESS `username` already holds a
-    seat in it, in which case it is "open" regardless. That exception is
-    what preserves reconnecting to the default game (a disconnected
-    player's seat is kept, per GameRegistry.join, precisely so they can
-    come back to it -- the countdown gives that window a deadline but
-    does not remove the seat before it). Without the exception, a game
-    everyone had actually left is skipped (a bug found by manual testing:
-    a stranger arriving at the default game used to be handed one still
-    holding a seated but long-gone player, and sat there waiting for an
-    opponent who was never coming back) -- a finished game is skipped the
-    same way it always was, which is also why the remembered id must be
-    re-checked every call rather than trusted forever."""
+    """The default-game policy: players asking for neither a room nor
+    Play share one open game, remembered in `default_game` rather than
+    found by scanning the registry, since a room lives there too.
+    "Open" means not game_over and has a connected player, unless
+    `username` already holds a seat -- so a disconnected player returns."""
     game_id = default_game["id"]
     if game_id is not None:
         session = registry.session(game_id)
@@ -108,13 +77,10 @@ def _find_or_create_game(registry, default_game, username):
 
 
 def _create_room(registry, room_id):
-    """room_create policy: a room is exactly "a game two specific people
-    agreed to meet in", and GameRegistry already keys games by id -- so
-    the room id simply IS the game id, and creating a room is nothing
-    more than registry.create(game_id=room_id), already-existing
-    machinery. -> room_id on success. -> None if a game with that id
-    already exists: two rooms may not share a name, so this must refuse
-    rather than silently join the caller into someone else's room."""
+    """room_create policy: a room's id IS its game id (GameRegistry
+    already keys games by id), so creating one is just
+    registry.create(game_id=room_id). -> room_id on success, -> None if
+    that id already exists -- two rooms may not share a name."""
     if room_id in registry.game_ids():
         return None
     game_id = registry.create(game_id=room_id)
@@ -124,14 +90,8 @@ def _create_room(registry, room_id):
 
 def _join_room(registry, room_id):
     """room_join policy. -> room_id if a game with that id exists, else
-    None -- unlike _create_room, joining never creates: a room is joined
-    by its id, typed in by whoever created it and read out to whoever is
-    joining, so a typo must be refused, not silently opened as a
-    brand-new empty room under that name.
-
-    Seating inside the room needs no new code at all once game_id is
-    chosen here: GameRegistry.join already gives "w" to the first
-    username, "b" to the second and "viewer" to everyone after."""
+    None -- unlike _create_room, joining never creates: a typo must be
+    refused, not silently opened as a new empty room under that name."""
     if room_id not in registry.game_ids():
         return None
     return room_id

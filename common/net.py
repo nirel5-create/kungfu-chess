@@ -1,38 +1,18 @@
 """Splits app.py's frame loop -- clock.tick() -> engine.snapshot() ->
-renderer.render() -- across a wire, without either half touching a socket.
+renderer.render() -- across a wire, without either half touching a
+socket. GameSession (server half) turns a decoded protocol message into
+an engine call; ClientProxy (client half) stands in for GameEngine, so
+input.Controller keeps calling request_move/request_jump exactly as
+before, each call now serialised to a `send` callable -- neither class
+nor Controller needs to know which side of the wire it is on.
 
-GameSession is the server half: it owns one GameEngine for a match and turns
-a decoded protocol message into an engine call. ClientProxy is the client
-half: it stands in for GameEngine so input.Controller can keep calling
-request_move/request_jump exactly as it does against the real engine, except
-each call is serialised and handed to a `send` callable instead of touching a
-board. Controller depends only on that command surface, so neither class nor
-Controller itself needs to know which side of the wire it is on.
-
-What this module owns: turning a message into an engine call, and turning an
-engine call into a message. What it does NOT own: sockets, asyncio, JSON
-framing (that is protocol.dumps/loads), or game rules.
-
-GameClock (input/game_clock.py) only reads the real wall clock -- tick() takes
-no `ms` argument, it measures time.monotonic() itself. That makes it unusable
-here: GameSession.advance(ms) must move the engine by a caller-chosen amount so
-tests (and the server's fixed ~30 ms tick) get deterministic, explicit time.
-So GameSession calls engine.wait(ms) directly and never holds a GameClock.
-
-Ownership -- who is allowed to move a given piece -- is enforced here, in
-GameSession.submit, not in GameEngine and not on the client. It is not a
-chess rule: the engine knows what is *legal*, not who is *allowed to ask*,
-so checking color there would break app.py, where local play depends on one
-person moving both sides. It is also not something a client may assert:
-color never travels inside a `move`/`jump` message, because a client that
-could put "color": "b" in a request could move the opponent's pieces. The
-server knows who you are from the connection (server.py assigns a color when
-a websocket connects), not from what a client claims -- the same principle
-as Server_Design.md: the client does not decide the rules, and neither does
-the gateway. So responsibility splits: server.py knows WHO you are
-(connection -> color), GameSession enforces the rule (does this piece belong
-to that color?), and GameEngine decides legality, unchanged and frozen.
-"""
+Ownership -- who may move a given piece -- is enforced here, in
+GameSession.submit, not in GameEngine (which knows what is *legal*, not
+who is *allowed to ask*, so checking color there would break local play,
+where one person moves both sides) and not by the client (color never
+travels in a `move`/`jump` message, since a client claiming "color": "b"
+could move the opponent's pieces). The server knows who you are from the
+connection, not from what a client claims."""
 
 from common import protocol
 
@@ -48,39 +28,11 @@ class GameSession:
         self._forced_game_over = False  # set by force_game_over(); see its docstring
 
     def submit(self, message, color=ANY_COLOR):
-        """Apply one already-decoded command dict (already validated by
-        protocol.loads) to the engine, after checking that `color` owns the
-        piece the message names. A `move` calls request_move, a `jump` calls
-        request_jump; any other type -- unknown, or a leftover from a message
-        kind this session does not act on -- is ignored rather than raised,
-        since the caller has already validated the wire shape and this is
-        only defence in depth. Does not advance time.
-
-        `color` defaults to ANY_COLOR for two deliberate reasons:
-        1. Local play (app.py, and any single-process use) is a supported
-           mode where one person moves both sides, so "no owner" must be
-           expressible.
-        2. The existing tests in tests/unit/test_session.py call
-           submit(message) with a single argument; the default keeps them
-           passing untouched, per IRON RULE 1.
-
-        See _may_act for the four possible values of `color` and what each
-        is allowed to do. A refused command is silently dropped, never
-        raised -- the same treatment as an unknown message type above.
-
-        Cells arrive as JSON lists, but the engine uses them as dict/set keys
-        internally (RealTimeArbiter tracks motions by cell), so each list is
-        converted to a tuple here before it reaches the engine.
-
-        -> True if the command was forwarded to the engine, False if it was
-        refused (unrecognized type, or `color` may not act on this piece).
-        This is "applied" only in the ownership sense -- the engine itself
-        is still free to silently ignore an illegal move, which this class
-        has no way to observe either (request_move/request_jump return
-        nothing). Existing callers that ignore the return value (every
-        test in tests/unit/test_session.py, and ClientProxy, which never
-        calls submit at all) are unaffected -- they never looked at the
-        old implicit None."""
+        """Apply one already-decoded command dict to the engine, after
+        checking `color` owns the piece named. `color` defaults to
+        ANY_COLOR so local play (one person moving both sides) keeps
+        working. An unrecognised type or an ownership refusal is
+        ignored, never raised. -> True if forwarded, False if refused."""
         message_type = message.get("type")
         if message_type == protocol.MOVE:
             if self._may_act(color, message["src"]):
@@ -95,15 +47,10 @@ class GameSession:
         return False
 
     def _may_act(self, color, cell):
-        """Whether `color` may act on the piece sitting at `cell` (a JSON
-        list; _piece_color_at wants a tuple, matching how the engine itself
-        keys motions by cell).
-
-        - ANY_COLOR: always -- local play, ownership is not enforced.
-        - "viewer": never -- a viewer may watch but not move anything.
-        - "w" / "b": only if that color owns the piece at `cell`. An empty
-          cell has no owner, so this is also False -- there is nothing to
-          move, and the engine would have refused it anyway."""
+        """Whether `color` may act on the piece at `cell`. ANY_COLOR:
+        always (local play). "viewer": never. "w"/"b": only if that
+        color owns the piece there -- an empty cell has no owner, so
+        this is also False."""
         if color == ANY_COLOR:
             return True
         if color == "viewer":
@@ -114,9 +61,8 @@ class GameSession:
         """The color of the piece at `cell`, or None if the cell is empty.
         The engine has no "piece at cell" accessor (it is frozen), so this
         walks snapshot().pieces instead -- the same lookup client.py's
-        _SnapshotBoard.piece_at does against a snapshot on the client side:
-        one approach to "what is on this cell", used consistently rather
-        than two."""
+        _SnapshotBoard.piece_at does on the client side, so there is one
+        approach to "what is on this cell", used consistently, not two."""
         row, col = cell
         for piece in self._engine.snapshot().pieces:
             if piece.row == row and piece.col == col:
@@ -128,22 +74,17 @@ class GameSession:
         self._engine.wait(ms)
 
     def force_game_over(self):
-        """Mark this session over without going through the engine's own
-        capture-based ending -- used by GameRegistry's disconnect
-        auto-resign (slide 5.2), which ends a game no king was captured
-        in. The (frozen) engine is never told and keeps whatever position
-        it already had; `game_over` and `snapshot()` below both reflect
-        the forced end immediately, which is what lets the client's
-        existing game-over handling (driven entirely by a snapshot's
-        `game_over` field) show "GAME OVER" and stop accepting moves for
-        an auto-resign exactly as it already does for a real capture,
-        with no separate client-side code path."""
+        """Mark this session over without the engine's own capture-based
+        ending -- used for disconnect auto-resign, where no king was
+        captured. The (frozen) engine is never told; `game_over` and
+        snapshot() reflect the forced end immediately, so the client's
+        existing game-over handling fires with no separate code path."""
         self._forced_game_over = True
 
     def snapshot(self):
         """-> the engine's current GameSnapshot, with `game_over` forced
-        True once force_game_over() has been called -- see its docstring
-        for why the engine's own snapshot does not already say so."""
+        True once force_game_over() has been called (the frozen engine
+        is never told, so its own snapshot would not otherwise say so)."""
         snapshot = self._engine.snapshot()
         if self._forced_game_over and not snapshot.game_over:
             return snapshot._replace(game_over=True)
@@ -152,7 +93,8 @@ class GameSession:
     @property
     def game_over(self):
         """-> whether the engine has ended the game, or force_game_over()
-        was called -- see its docstring for why these can differ."""
+        was called (the two can differ since a forced end never reaches
+        the frozen engine)."""
         return self._engine.game_over or self._forced_game_over
 
 

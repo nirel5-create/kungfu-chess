@@ -12,29 +12,26 @@ import websockets
 
 from common import protocol
 
-# How long a countdown is still considered live with no new message -- see
-# _ServerLink.countdown()'s own docstring for why this cannot be 0.
+# How long a countdown is still considered live with no new message.
 _COUNTDOWN_STALE_S = 2.0
 
 _log = logging.getLogger(__name__)
 
-# The decoded shape of a server `history` message -- see _ServerLink.
-# history() and client.panel_overlay.PanelOverlay, which reads exactly
-# these five fields.
+# The decoded shape of a server `history` message; client.panel_overlay.
+# PanelOverlay reads these five fields directly.
 _History = namedtuple("_History", "white_name black_name white_score black_score log")
 
-# Identity, fixed for the whole life of the connection -- sent once, in
-# _receive_loop's own login message, never touched again (not even by
-# reset_for_new_round: a reused connection reuses the same login).
+# Identity, fixed for the life of the connection: never reassigned, not
+# even by reset_for_new_round, since a reused connection reuses the same
+# login.
 _Credentials = namedtuple("_Credentials", "uri username password")
 
 
 class _Connection:  # pylint: disable=too-few-public-methods
-    """The asyncio machinery _ServerLink's own network thread owns: its
-    event loop and thread (both created once, in __init__, and never
-    replaced -- this connection is reused across games, not rebuilt) and
-    the websocket itself (None until _receive_loop's own `async with
-    websockets.connect(...)` opens it)."""
+    """The asyncio machinery the network thread owns: its event loop and
+    thread (created once, never replaced -- this connection is reused
+    across games, not rebuilt) and the websocket itself (None until
+    `_receive_loop` opens it)."""
 
     def __init__(self, loop, thread):
         self.loop = loop
@@ -43,12 +40,10 @@ class _Connection:  # pylint: disable=too-few-public-methods
 
 
 class _SeatOutcome:  # pylint: disable=too-few-public-methods
-    """How the current room_create/room_join/play request resolved:
-    the assigned color and room -- paired, not independent, since the
-    server always sends `room` strictly before `assigned` on a
-    successful room_create/room_join (see _ServerLink.room()'s own
-    docstring) -- or `error` instead of either on refusal (see
-    _ServerLink.error()'s own docstring)."""
+    """How the current room_create/room_join/play request resolved: color
+    and room are paired, not independent, since the server always sends
+    `room` strictly before `assigned` on success -- or `error` instead of
+    either on refusal."""
 
     def __init__(self):
         self.color = None  # None until the server's `assigned` message arrives
@@ -59,8 +54,8 @@ class _SeatOutcome:  # pylint: disable=too-few-public-methods
 class _CountdownState:  # pylint: disable=too-few-public-methods
     """The opponent's disconnect countdown, as last reported: the whole
     seconds remaining, and when that report arrived (time.time()) --
-    always read and written together, see _ServerLink.countdown()'s own
-    docstring for why both are needed to decide "is this still live"."""
+    always read and written together, since both are needed to decide
+    whether the countdown is still live."""
 
     def __init__(self):
         self.seconds = None
@@ -68,56 +63,38 @@ class _CountdownState:  # pylint: disable=too-few-public-methods
 
 
 class _RoundState:  # pylint: disable=too-few-public-methods
-    """Every _ServerLink field that resets when client.composition.run()
-    sends a new room choice on this SAME, still-open connection -- see
-    _ServerLink.reset_for_new_round(). Bundled into one object so
-    resetting is one reassignment instead of nine, and so a value left
-    over from the game that just ended cannot be mistaken for this
-    round's own before the server's first new message for it arrives."""
+    """Every _ServerLink field that resets for a new round on the same,
+    still-open connection. Bundled into one object so resetting is a
+    single reassignment instead of nine, and a value left over from the
+    game that just ended cannot be mistaken for this round's own before
+    the server's first new message arrives."""
 
     def __init__(self):
         self.snapshot = None
         self.seat = _SeatOutcome()
         self.countdown = _CountdownState()
-        self.result = None  # (winner, winner_username) once `game_over` arrives -- see result()
-        self.matchmaking_status = None  # "searching"/"found"/"timeout" -- see matchmaking_status()
-        self.waiting = False  # None-equivalent: no `waiting` has arrived yet -- see waiting()
+        self.result = None  # (winner, winner_username) once `game_over` arrives
+        self.matchmaking_status = None  # "searching"/"found"/"timeout"
+        self.waiting = False  # None-equivalent: no `waiting` has arrived yet
 
 
 class _ServerLink:  # pragma: no cover
-    """Exposes the latest decoded snapshot (None until the first one
-    arrives) and a synchronous `send`, which is exactly the callable
-    ClientProxy needs.
-
-    All attributes are load-bearing: the connection's identity
-    (_credentials), its asyncio machinery (_conn), the shared state the
-    network thread writes and the OpenCV thread reads that resets every
-    round (_round) or does not (_history, _rating), and the lock
-    guarding all of the above. None is redundant with another, so
-    splitting this further would not reduce complexity, only move it
-    behind another name.
-
-    The room choice is deliberately NOT part of this constructor: it used
-    to be sent as an automatic second message, right after login, inside
-    _receive_loop. That meant the Room dialog (client/roomdialog.py, a
-    real OS window a human interacts with) had to be shown and answered
-    BEFORE this class even existed -- before the connection was opened,
-    before login was checked -- so a rejected password was only
-    discovered after the player had already filled in the dialog for
-    nothing. Now login is sent alone, on connect, and client.composition.
-    run() sends the room choice afterward through the ordinary public
-    `send` below, once the dialog has actually closed."""
+    """Owns the connection: exposes the latest decoded snapshot (None
+    until the first one arrives) and a synchronous `send`. The room
+    choice is sent separately from login, once the Room dialog has
+    closed, so a rejected password is discovered before the player fills
+    in a dialog that was never going to matter."""
 
     def __init__(self, uri, username, password):
-        """password -- sent with `username` in the `login` message; see
-        protocol.login's own docstring for what this does and does not
-        protect against on an unencrypted local WebSocket."""
+        """`password` is sent with `username` in the plaintext `login`
+        message; this is not protection against anything beyond a casual
+        glance on an unencrypted local WebSocket."""
         self._credentials = _Credentials(uri, username, password)
         self._conn = _Connection(asyncio.new_event_loop(),
                                   threading.Thread(target=self._run, daemon=True))
         self._round = _RoundState()
-        self._history = None  # _History once a `history` message arrives -- see history()
-        self._rating = None  # None until a `rating` message arrives -- see rating()
+        self._history = None  # _History once a `history` message arrives
+        self._rating = None  # None until a `rating` message arrives
         self._lock = threading.Lock()
 
     def start(self):
@@ -139,42 +116,27 @@ class _ServerLink:  # pragma: no cover
 
     def room(self):
         """-> the room id from the server's `room` message, or None if no
-        room was requested (see room_action) or none has arrived yet --
-        guarded by the same lock as `snapshot`/`color`. Sent by the server
-        strictly before `assigned` on a successful room_create/room_join
-        (see server.connection._handle_client), so by the time color() is
-        no longer None, this is already populated whenever a room was
-        requested at all."""
+        room was requested or none has arrived yet -- guarded by the same
+        lock as `snapshot`/`color`. Sent by the server strictly before
+        `assigned`, so this is already populated by the time color() is
+        no longer None, whenever a room was requested at all."""
         with self._lock:
             return self._round.seat.room
 
     def error(self):
         """-> the reason string from the server's `error` message, or None
-        if none has arrived (yet, or ever) -- guarded by the same lock as
-        `snapshot`/`color`, since the network thread writes all three. A
-        server that refuses the connection (e.g. AlreadyConnectedError, or
-        "room_exists"/"no_such_room" -- see server.connection._handle_client)
-        sends this instead of `assigned`, so client.composition.run() can
-        tell the two apart before ever opening a window."""
+        if none has arrived -- guarded by the same lock as
+        `snapshot`/`color`. A server that refuses the connection sends
+        this instead of `assigned`, so callers can tell the two apart
+        before ever opening a window."""
         with self._lock:
             return self._round.seat.error
 
     def countdown(self):
-        """-> the seconds remaining on the opponent's disconnect countdown,
-        or None when nothing is currently counting down.
-
-        The server only sends a `countdown` message when the second value
-        changes (see server.tick) -- roughly once a second while one is
-        active -- not every tick, and it never sends an explicit "cleared"
-        message when the opponent reconnects; the opponent simply stops
-        appearing in the per-tick broadcast. So "no message this exact
-        instant" cannot mean "cleared" on its own, or this would flicker
-        off between every pair of per-second updates. Instead a countdown
-        is considered live as long as one was reported within
-        `_COUNTDOWN_STALE_S` -- a comfortable multiple of that ~1s cadence
-        -- and considered cleared once that window has passed with nothing
-        new, which is what actually happens the moment the opponent
-        reconnects and the server stops sending updates for them."""
+        """-> seconds remaining on the opponent's disconnect countdown, or
+        None when none is active. The server sends `countdown` only on
+        change, with no explicit "cleared" message, so this is treated as
+        live only within `_COUNTDOWN_STALE_S` of the last report."""
         with self._lock:
             if self._round.countdown.seconds is None:
                 return None
@@ -184,87 +146,54 @@ class _ServerLink:  # pragma: no cover
 
     def result(self):
         """-> (winner, winner_username) from the server's `game_over`
-        message, or None before one has arrived. `winner` is "w"/"b"/None;
-        `winner_username` is the display name for a decisive win, or None
-        when `winner` is None -- no result, not a draw (Server_Design.md).
-
-        The server sends `game_over` once, right after the last `state`
-        for that game (see server.tick), so a caller polling this every
-        frame -- see client.composition.run() -- will see it become
-        non-None within a frame or two of `snapshot().game_over` turning
-        True, not necessarily the exact same frame; run() waits for both
-        rather than assuming they always land together."""
+        message, or None before one has arrived. `winner_username` is set
+        only for a decisive win, never a draw. Sent once, right after the
+        final `state`, so this may turn non-None a frame or two after
+        `snapshot().game_over` turns True, not necessarily the same one."""
         with self._lock:
             return self._round.result
 
     def matchmaking_status(self):
         """-> the latest status from a `matchmaking` message ("searching",
-        "found", or "timeout" -- see protocol.matchmaking's own docstring),
-        or None before any has arrived. Only ever set for a connection
-        that sent protocol.play() (see client.composition.run()); a
-        Room/default-game connection never receives this message type at
-        all, so this stays None for the whole session in that case."""
+        "found", or "timeout"), or None before any has arrived. Only ever
+        set for a connection that requested matchmaking; a Room/default-
+        game connection never receives this message type at all."""
         with self._lock:
             return self._round.matchmaking_status
 
     def history(self):
         """-> the latest _History(white_name, black_name, white_score,
-        black_score, log) from the server's own `history` message, or None
-        before one has arrived -- read by client.panel_overlay.
-        PanelOverlay, ScorePanel's adapter for this data. The server sends
-        this on every change and, separately, immediately whenever this
-        connection joins or reconnects (see server.connection), so a
-        client that joined mid-game still sees the full log and scores
-        from the very first one it receives, not just changes from that
-        point on."""
+        black_score, log), or None before one has arrived. The server
+        resends this on every change and also immediately on join or
+        reconnect, so a client that joins mid-game still sees the full
+        log and scores from its first message, not just later changes."""
         with self._lock:
             return self._history
 
     def rating(self):
         """-> this connection's own current ELO rating from the server's
-        latest `rating` message, or None before the first one has arrived.
-        The server sends this once right after a successful login and
-        again, unsolicited, whenever a game this connection was part of
-        ends decisively (see server.tick), so this reflects the true
-        current rating for the whole session -- shown in the home dialog
-        every time it reopens, including after the very game that just
-        changed it -- not just a value fetched once at login."""
+        latest `rating` message, or None before the first one has
+        arrived. Sent once after login and again whenever a game this
+        connection was part of ends decisively, so it reflects the true
+        current rating even right after the game that just changed it."""
         with self._lock:
             return self._rating
 
     def waiting(self):
-        """-> whether this game currently has an empty "w" or "b" seat,
-        from the server's latest `waiting` message -- False before one
-        has ever arrived, matching a fresh game where nobody would show
-        this text yet anyway. Fixed by live testing: a solo player could
-        otherwise walk a piece across an unopposed board and capture the
-        other side's undefended king for a free, repeatable win, with the
-        board simply looking frozen rather than explaining why. The
-        server sends this only when the value CHANGES, so this reflects
-        whichever state was most recently true, not necessarily "just
-        now"."""
+        """-> whether this game currently has an empty seat, from the
+        server's latest `waiting` message -- False before one arrives.
+        Without this, a solo player could capture the other side's
+        undefended king while the board simply looked frozen. Sent only
+        on change, so this is whichever value was most recently true."""
         with self._lock:
             return self._round.waiting
 
     def reset_for_new_round(self):
-        """Clear every OTHER per-round field back to its fresh-connection
-        value: `snapshot`, `color`, `room`, `error`, the countdown pair,
-        `result`, `matchmaking_status`, and `waiting`. Called by
-        client.composition.run() right before sending a new room choice
-        on this SAME, still-open connection, so a value left over from
-        the game that just ended -- a stale snapshot, an old result, a
-        countdown, a leftover "waiting for an opponent" -- cannot flash on
-        screen or be mistaken for this round's own before the server's
-        first new message for it arrives.
-
-        Does NOT touch identity (_credentials), the asyncio
-        thread/loop/websocket (_conn, all still alive and still needed --
-        this connection is being reused, not rebuilt), `history`
-        (PanelOverlay reads it every frame regardless of game state, and
-        the server will send a fresh one anyway, the same as every other
-        field it drives), or `rating` (the home dialog shows it across
-        rounds, and a round that never ends decisively sends no fresh one
-        to replace it with)."""
+        """Clear every per-round field back to its fresh-connection value,
+        so nothing left over from the game that just ended can flash on
+        screen before the new round's first message arrives. Identity,
+        the connection machinery, `history`, and `rating` are left alone:
+        this connection is reused, not rebuilt."""
         with self._lock:
             self._round = _RoundState()
 
@@ -340,13 +269,10 @@ class _ServerLink:  # pragma: no cover
             self._round.waiting = message["waiting"]
         _log.info("waiting: %s", message["waiting"])
 
-    # One entry per message type the server ever sends (STATE/ASSIGNED/
-    # ROOM/ERROR/COUNTDOWN/GAME_OVER/MATCHMAKING/HISTORY/RATING/WAITING),
-    # each already its own small handler above -- a dispatch table instead
-    # of one flat if/elif chain, so _receive_loop below is just "look up
-    # and call". A class attribute, not built per instance: every
-    # _ServerLink dispatches the same way, and building it once avoids
-    # re-binding ten methods on every single connection.
+    # A dispatch table instead of a flat if/elif chain, so _receive_loop
+    # below is just "look up and call". A class attribute, not built per
+    # instance, so it is built once rather than re-bound on every
+    # connection.
     _HANDLERS = {
         protocol.STATE: _on_state,
         protocol.ASSIGNED: _on_assigned,
@@ -365,21 +291,14 @@ class _ServerLink:  # pragma: no cover
             self._conn.websocket = websocket
             _log.info("connected to %s", self._credentials.uri)
             # Sent here, inside the coroutine that just opened the socket,
-            # rather than via the public `send` after start() returns: `send`
-            # silently drops a message until `_conn.websocket` is set (see
-            # below), so sending the login from outside this loop would
-            # race the connection actually being up. Sending it here, as
-            # the first thing done once the socket is open, makes it
-            # always the first message on the wire with no race.
+            # rather than via the public `send`: `send` silently drops a
+            # message until `_conn.websocket` is set, so sending the login
+            # from outside this loop would race the connection being up.
             await websocket.send(protocol.dumps(
                 protocol.login(self._credentials.username, self._credentials.password)))
             _log.info("login sent as %s", self._credentials.username)
-            # The room choice (protocol.PLAY / ROOM_CREATE / ROOM_JOIN) is
-            # the optional second message the server reads after login
-            # (see server.rooms._read_room_choice) -- sent later, from
-            # client.composition.run(), through the public `send` below,
-            # once the Room dialog has actually closed. Not sent from here
-            # any more -- see this class's own docstring for why.
+            # The room choice is sent later, through the public `send`
+            # below, once the Room dialog has closed -- not from here.
             async for raw in websocket:
                 try:
                     message = protocol.loads(raw)
