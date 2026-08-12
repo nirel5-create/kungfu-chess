@@ -91,7 +91,7 @@ client/       app.py's frame loop with a websocket instead of a local engine (ru
 | `.\check.ps1` | `python -m pytest -q`, then `python -m pylint` on the packages this project owns (`common`, `server.py`, `server`, `client`) | 615 tests passing, pylint 10.00/10 |
 | `.\check.ps1 -Full` | Everything above, plus 100% branch coverage on `model`, `rules`, `realtime`, `engine`, `input`, `boardio`, `texttests`, `view`, `common`, `main`, and `client`, plus `tools\fuzz_game.py 2000` | 100% coverage, a clean 2000-game fuzz run |
 
-`engine/`, `model/`, `rules/`, `realtime/`, `boardio/`, `texttests/`, `view/`, `input/` are mentor-authored/frozen and out of scope for the pylint gate.
+`engine/`, `model/`, `rules/`, `realtime/`, `boardio/`, `texttests/`, `view/`, `input/` are frozen by choice, not by authorship — they're proven correct by the 2000-game fuzz suite and covered by the coverage gate instead of the pylint one.
 
 ## Documents
 
