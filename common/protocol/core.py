@@ -52,6 +52,15 @@ WAITING = "waiting"
 # Colors are "w" / "b" -- the same spelling Config and PieceView already
 # use. Do not introduce "white" / "black" anywhere.
 
+# --- error reasons -------------------------------------------------------
+
+# The subset of `error` message reasons raised for a bad room choice, not
+# a login failure: the server keeps the connection open for these (see
+# server.connection._refuse_room_choice) so the client can show the
+# reason and let the player pick again on the same connection, instead
+# of ending the session as every other `error` reason still does.
+ROOM_REFUSAL_REASONS = frozenset({"invalid_room_name", "room_exists", "no_such_room"})
+
 # type -> field names a message of that type must carry.
 _REQUIRED_FIELDS = {
     LOGIN: ("username", "password"),

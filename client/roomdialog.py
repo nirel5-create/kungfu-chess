@@ -128,6 +128,22 @@ def show_no_opponent_found():  # pragma: no cover -- opens a real window
     messagebox.showinfo("Play", "No opponent found. Try again later.", parent=_get_root())
 
 
+_ROOM_REFUSAL_MESSAGES = {
+    "invalid_room_name": "Room names may only use letters, digits, spaces, "
+                          f"- and _, up to {MAX_NAME_LENGTH} characters.",
+    "room_exists": "A room with that name already exists. Try Join instead.",
+    "no_such_room": "No room with that name exists. Try Create instead.",
+}
+
+
+def show_room_refused(reason):  # pragma: no cover -- opens a real window
+    """Tell the player their room choice was refused, via a real OS
+    dialog, so they can pick again from the home dialog that follows.
+    `reason` not in `_ROOM_REFUSAL_MESSAGES` (should not happen) shows
+    the raw reason string rather than crashing."""
+    messagebox.showerror("Room", _ROOM_REFUSAL_MESSAGES.get(reason, reason), parent=_get_root())
+
+
 _PROGRESS_POLL_MS = 200  # how often the countdown label is refreshed
 
 

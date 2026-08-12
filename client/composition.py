@@ -16,7 +16,7 @@ from client.panel_overlay import PanelOverlay
 from client.play import _play_one_game
 from client.roomdialog import (
     CREATE, JOIN, PLAY, ask_room, shutdown as shutdown_dialogs,
-    show_matchmaking_progress, show_no_opponent_found,
+    show_matchmaking_progress, show_no_opponent_found, show_room_refused,
 )
 from client.sound import SoundPlayer
 from common import net, protocol, topics
@@ -205,9 +205,17 @@ def run():  # pragma: no cover
                 # ordinary wait below picks it up with no special case.
             _wait_for_assignment_or_error(link)
             if link.error() is not None:
-                # The server already closed this connection for a room
-                # refusal (room_exists/no_such_room), so there is nothing
-                # left to reuse -- ending the program outright is correct.
+                if link.error() in protocol.ROOM_REFUSAL_REASONS:
+                    # The server kept this connection open for a bad room
+                    # choice: show why, then go back to the home dialog on
+                    # the same connection, the same PLAYING -> HOME shape
+                    # the no-opponent-found branch above already uses.
+                    show_room_refused(link.error())
+                    flow.game_ended()
+                    continue
+                # Any other reason (e.g. already_connected) means the
+                # server already closed this connection -- nothing left
+                # to reuse.
                 print(f"Connection refused by server: {link.error()}")
                 return
             ui = build_client(link, sound_player)

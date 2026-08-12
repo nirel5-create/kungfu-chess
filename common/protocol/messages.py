@@ -150,9 +150,10 @@ def room(room_id):
 
 
 def error(reason):
-    """`reason` is a short human-readable string describing what went
-    wrong, not a machine-readable code (unlike `ProtocolError.code`). It is
-    meant for logging or display, not for the receiver to branch on."""
+    """`reason` is a short, stable string describing what went wrong, not
+    a machine-readable code (unlike `ProtocolError.code`). Mostly for
+    logging/display, but the client does branch on the fixed subset in
+    ROOM_REFUSAL_REASONS -- see client.composition.run."""
     return {"type": ERROR, "reason": reason}
 
 
