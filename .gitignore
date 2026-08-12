@@ -7,3 +7,4 @@ tmp_*.py
 .vscode/
 logs/
 .claude/
+docs/internal/
