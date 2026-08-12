@@ -1,6 +1,4 @@
-# Repo:   https://github.com/nirel5-create/kungfu-chess
-# Report: https://nirel5-create.github.io/kungfu-chess/ARCHITECTURE_REPORT.html
-#         (interactive, rendered architecture report)
+# Repo: https://github.com/nirel5-create/kungfu-chess
 """Entry point for the text protocol. Reads a script on stdin, writes the
 board on stdout. It composes the objects and hands over -- it holds no game
 logic, no text format, and no command meanings of its own."""
