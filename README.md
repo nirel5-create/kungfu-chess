@@ -41,6 +41,15 @@ The client always runs on the host — it opens a real window and needs a displa
 
 Verified: built and started both containers, confirmed in the logs that the server connected to Postgres and was listening, connected a client, then tore the stack down cleanly.
 
+### Playing across machines
+
+By default `python -m client` connects to `ws://localhost:8765`. Point it at a server on another machine, or a hosted one, with `KUNGFU_SERVER`:
+
+```bash
+KUNGFU_SERVER=ws://192.168.1.42:8765 python -m client   # a server elsewhere on the LAN
+KUNGFU_SERVER=wss://your-host.example python -m client  # a hosted server, over TLS
+```
+
 ## What a player sees
 
 1. **Username and password**, typed at a terminal prompt (`python -m client` asks before any window opens) — the password is never echoed. A new username creates an account on the spot; an existing one must match its stored password, or the login is refused and re-prompted.

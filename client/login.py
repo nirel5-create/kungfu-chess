@@ -3,14 +3,24 @@ follow it: for a login refusal, and for a seat once a room choice is sent.
 """
 
 import getpass
+import os
 import time
 
 from client.homescreen import HomeFlow
 from client.link import _ServerLink
 from common.logsetup import add_file_logging, sanitize_for_filename
 
-_SERVER_URI = "ws://localhost:8765"
+_DEFAULT_SERVER_URI = "ws://localhost:8765"
 _LOG_DIR = "logs"
+
+
+def _server_uri():  # pragma: no cover
+    """-> the server to connect to: the KUNGFU_SERVER environment
+    variable if set, else _DEFAULT_SERVER_URI. Read here, at connect
+    time, rather than captured into a module-level constant at import
+    time, so a caller or a test can set the variable and have it take
+    effect without reimporting this module."""
+    return os.environ.get("KUNGFU_SERVER", _DEFAULT_SERVER_URI)
 
 
 def _prompt_username(mention_quit=False):  # pragma: no cover
@@ -55,7 +65,7 @@ def _login():  # pragma: no cover
         if not username or username.lower() == "q":
             return flow, None
         password = _prompt_password()
-        link = _ServerLink(_SERVER_URI, username, password)
+        link = _ServerLink(_server_uri(), username, password)
         link.start()
         _wait_for_login_error(link)
         if link.error() is None:
