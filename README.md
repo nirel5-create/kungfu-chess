@@ -9,7 +9,7 @@ Repo: https://github.com/nirel5-create/kungfu-chess
 
 ## Quick start
 
-Three ways to play. All three are verified against this checkout.
+Four ways to play. All four are verified against this checkout.
 
 ### 1. Offline, one process, one keyboard
 
@@ -41,13 +41,50 @@ The client always runs on the host — it opens a real window and needs a displa
 
 Verified: built and started both containers, confirmed in the logs that the server connected to Postgres and was listening, connected a client, then tore the stack down cleanly.
 
-### Playing across machines
+### 4. Two people, two machines
 
-By default `python -m client` connects to `ws://localhost:8765`. Point it at a server on another machine, or a hosted one, with `KUNGFU_SERVER`:
+The client reads its server address from `KUNGFU_SERVER`, falling back to
+`ws://localhost:8765` when it is unset — so nothing above changes if you run
+everything locally.
+
+**On the same network**, one machine runs the server and the other points at it:
 
 ```bash
-KUNGFU_SERVER=ws://192.168.1.42:8765 python -m client   # a server elsewhere on the LAN
-KUNGFU_SERVER=wss://your-host.example python -m client  # a hosted server, over TLS
+python server.py                                          # machine A
+KUNGFU_SERVER=ws://192.168.1.42:8765 python -m client     # machine B
+```
+
+Use machine A's local IP address, not `localhost`. On Windows, PowerShell sets
+the variable differently:
+
+```powershell
+$env:KUNGFU_SERVER="ws://192.168.1.42:8765"
+python -m client
+```
+
+**Across the internet**, the server needs to be somewhere both players can
+reach. The `Dockerfile` and `docker-compose.yml` deploy as-is to any container
+host; on Railway it is a GitHub import plus a Postgres service, with
+`DATABASE_URL` pointed at it. Players then need only the client:
+
+```powershell
+$env:KUNGFU_SERVER="wss://your-app.up.railway.app"
+python -m client
+```
+
+Note `wss://` rather than `ws://` — a hosted server is served over TLS — and no
+port, since the host routes it.
+
+Verified: deployed to Railway with a Postgres service, connected a client from
+a different machine over `wss://`, created a room, and confirmed the server
+logged the connection.
+
+**If the client fails with `CERTIFICATE_VERIFY_FAILED`**, the local certificate
+store is out of date — this is a machine problem, not a project one:
+
+```powershell
+pip install --upgrade certifi
+$env:SSL_CERT_FILE=(python -c "import certifi; print(certifi.where())")
 ```
 
 ## What a player sees
